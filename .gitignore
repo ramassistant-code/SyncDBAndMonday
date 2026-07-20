@@ -1,0 +1,8 @@
+node_modules/
+# ignore ALL env files except the documented example
+.env*
+!.env.example
+web/dist/
+web/node_modules/
+dist/
+*.log

@@ -117,6 +117,13 @@ export async function applyPlan({ supabase, monday, target, direction, selectedK
           if (!allowUpdate) { summary.skipped++; continue; }
           const patch = {};
           for (const ch of row.changes) {
+            // The Monday item TITLE (name column) is written on CREATE only, not
+            // UPDATE — mirroring the real-time path (syncSingle.js:101). For
+            // relational children it is a display label ("customer | date"), so
+            // writing it back would clobber the DB business key
+            // (payment_number/deal_number) on every sync. DB owns the title
+            // after creation.
+            if (ch.mondayColumnId === 'name') continue;
             const v = coerceForDb(ch.to, dbTypes[ch.field]);
             if (v === null && notNull.has(ch.field)) continue; // keep existing value, don't null a NOT-NULL
             patch[ch.field] = v;

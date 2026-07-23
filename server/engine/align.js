@@ -27,17 +27,6 @@ const COMPOSITE = {
   payment: { amountFields: ['amount_paid'], amountMapField: 'amount_paid' },
 };
 
-// Relational children that also expose a UNIQUE business number on the Monday
-// board — a far more reliable key than amount+customer when present (amount +
-// customer is ambiguous whenever a customer has several equal-amount rows).
-// The DB enforces this column UNIQUE, so a number match is never ambiguous.
-// Tried BEFORE the composite fallback in alignComposite().
-const NUMBER_KEY = {
-  payment: 'payment_number',
-};
-
-const normNumber = (v) => (v == null ? '' : String(v).trim());
-
 export async function buildAlignment({ supabase, monday, target }) {
   const boardId = target.monday_board_id;
   if (!boardId || boardId === 'CONFIGURE_BOARD_ID') {
@@ -168,34 +157,22 @@ async function alignComposite({ supabase, monday, target, boardStr, table, colFo
   const amountCol = colFor(cfg.amountMapField);
   if (!amountCol) { const e = new Error(`No Monday amount column mapped for ${target.entity_type}`); e.status = 422; throw e; }
 
-  // Optional UNIQUE business-number key (e.g. payments.payment_number): tried
-  // first, ahead of the ambiguous amount+customer composite.
-  const numberField = NUMBER_KEY[target.entity_type];
-  const numberCol = numberField ? colFor(numberField) : null;
-  const useNumber = Boolean(numberCol && colNames.has(numberField));
-
   // customer_id → normalized customer name
   const custs = await supabase.select('customers', { columns: 'id,name' });
   const custName = new Map(custs.map((c) => [c.id, normalizeName(c.name)]));
 
-  const dbCols = ['id', 'monday_board_id', 'monday_item_id', 'customer_id', ...cfg.amountFields, ...(useNumber ? [numberField] : [])]
-    .filter((c) => colNames.has(c) || c === 'id');
+  const dbCols = ['id', 'monday_board_id', 'monday_item_id', 'customer_id', ...cfg.amountFields].filter((c) => colNames.has(c) || c === 'id');
   const dbRows = colNames.has('deleted_at')
     ? await supabase.select(table, { columns: dbCols.join(','), filters: ['deleted_at=is.null'] })
     : await supabase.select(table, { columns: dbCols.join(',') });
   const items = await monday.getItems(boardStr);
 
-  // index DB rows by unique business number (if any) and by every rounded amount
-  const byNumber = new Map();
+  // index DB rows by every rounded amount they expose
   const byAmt = new Map();
   const alignedByItem = new Map();
   for (const r of dbRows) {
     if (r.monday_board_id && String(r.monday_board_id) === boardStr && r.monday_item_id) {
       alignedByItem.set(String(r.monday_item_id), r);
-    }
-    if (useNumber) {
-      const num = normNumber(r[numberField]);
-      if (num) { if (!byNumber.has(num)) byNumber.set(num, []); byNumber.get(num).push(r); }
     }
     const seen = new Set();
     for (const f of cfg.amountFields) {
@@ -212,31 +189,6 @@ async function alignComposite({ supabase, monday, target, boardStr, table, colFo
   const used = new Set();
   for (const item of items) {
     if (alignedByItem.has(String(item.id))) { counts.alreadyAligned++; continue; }
-
-    // 1) unique business-number match (unambiguous) — preferred.
-    if (useNumber) {
-      const num = normNumber(item.columns[numberCol] ? item.columns[numberCol].text : null);
-      if (num && byNumber.has(num)) {
-        const pool = byNumber.get(num).filter((r) => !used.has(r.id));
-        if (pool.length === 1) {
-          used.add(pool[0].id);
-          rows.push({ key: 'mon:' + item.id, op: 'link', mondayItemId: item.id, name: item.name,
-            matchedBy: 'payment_number', dbId: pool[0].id,
-            dbRow: { name: custName.get(pool[0].customer_id), number: num } });
-          counts.link++;
-          continue;
-        }
-        if (pool.length > 1) { // a UNIQUE column should never yield >1; guard anyway
-          rows.push({ key: 'mon:' + item.id, op: 'review', mondayItemId: item.id, name: item.name, matchedBy: 'payment_number',
-            candidates: pool.slice(0, 6).map((r) => ({ id: r.id, name: custName.get(r.customer_id), number: num })) });
-          counts.review++;
-          continue;
-        }
-        // pool empty (row already claimed) → fall through to the composite key
-      }
-    }
-
-    // 2) amount + customer-name-in-title composite (fallback).
     const a = roundAmt(item.columns[amountCol] ? item.columns[amountCol].text : null);
     const title = normalizeName(item.name);
     const cands = (a != null ? (byAmt.get(a) || []) : []).filter((r) => !used.has(r.id));
@@ -262,10 +214,8 @@ async function alignComposite({ supabase, monday, target, boardStr, table, colFo
 
   return {
     target: { key: target.target_key, name: target.target_name, entity_type: target.entity_type, table, board_id: boardStr },
-    matchKeys: useNumber ? ['payment_number', 'amount+customer'] : ['amount+customer'],
-    warnings: [useNumber
-      ? 'יישור: קודם לפי מספר ייחודי (payment_number), ואז סכום + שם לקוח בכותרת. דו-משמעי → לבדיקה, ללא התאמה → מדולג.'
-      : 'יישור מורכב (סכום + שם לקוח בכותרת): מקשר שורות DB קיימות עם ה-FK שלהן. דו-משמעי → לבדיקה, ללא התאמה → מדולג.'],
+    matchKeys: ['amount+customer'],
+    warnings: ['יישור מורכב (סכום + שם לקוח בכותרת): מקשר שורות DB קיימות עם ה-FK שלהן. דו-משמעי → לבדיקה, ללא התאמה → מדולג.'],
     counts,
     totals: { db: dbRows.length, monday: items.length },
     rows,

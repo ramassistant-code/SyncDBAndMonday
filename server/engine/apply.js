@@ -221,8 +221,11 @@ export function formatForMonday(value, colType) {
       return { label: v };
     case 'dropdown':
       return { labels: v.split(',').map((s) => s.trim()).filter(Boolean) };
-    case 'phone':
-      return { phone: v, countryShortName: 'IL' };
+    case 'phone': {
+      // Monday's phone column accepts digits only — strip dashes/spaces/etc.
+      const digits = v.replace(/\D/g, '');
+      return digits ? { phone: digits, countryShortName: 'IL' } : undefined;
+    }
     case 'email':
       return { email: v, text: v };
     case 'link':

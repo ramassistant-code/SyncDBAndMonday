@@ -161,10 +161,14 @@ export async function applyPlan({ supabase, monday, target, direction, selectedK
       }
     } catch (e) {
       const msg = e.message || '';
-      // Structural violations (missing parent FK, NOT-NULL we can't fill) are
-      // expected for relational children (e.g. credits need a deal) → skip,
-      // don't fail. Everything else is a real failure.
-      if (/not-null constraint|foreign key constraint/i.test(msg)) {
+      // Structural violations are expected, not real failures → skip, don't fail:
+      //   • not-null / foreign key   — relational children (e.g. credits need a deal)
+      //   • unique / duplicate key   — the row already exists in the DB under a
+      //     different (or missing) Monday link and can't be auto-aligned
+      //     (e.g. payments with a non-unique amount+customer key); the data is
+      //     already present, only the Monday↔DB link is absent.
+      // Everything else is a real failure.
+      if (/not-null constraint|foreign key constraint|unique constraint|duplicate key/i.test(msg)) {
         summary.skipped++;
         summary.results.push({ key: row.key, op: row.op, side: row.writeSide, name: row.name, skipped: msg });
       } else {

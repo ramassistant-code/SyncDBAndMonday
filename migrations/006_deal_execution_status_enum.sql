@@ -1,0 +1,28 @@
+-- ============================================================================
+-- 006_deal_execution_status_enum.sql
+-- Add the missing value to the deal_execution_status Postgres enum.
+--
+-- Bug (found live 2026-07-23 via the per-target n8n sync, target "deal"):
+--   48/48 create failures, all identical:
+--   Supabase: invalid input value for enum deal_execution_status: "בעבודה"
+--
+-- Root cause: deals.execution_status is a real Postgres ENUM (not a lookup-
+-- backed text column), so the engine's ensureLookups() auto-extend
+-- (server/engine/apply.js:28, covers only lead/customer text columns) cannot
+-- add it. Monday holds "בעבודה" which the enum type does not allow -> insert
+-- rejected. Monday = source of truth in test, so we extend the enum.
+--
+-- NOTE: ALTER TYPE ... ADD VALUE cannot run inside a transaction block and the
+-- new value is usable only AFTER this statement commits. Run it on its own
+-- (no surrounding begin/commit). Idempotent via IF NOT EXISTS.
+--
+-- This adds only the value observed in the 20-customer dev sample. Production
+-- may hold additional execution_status labels not present in dev; re-run with
+-- more ADD VALUE lines if new "invalid input value for enum" errors appear.
+-- (Longer-term alternative: convert execution_status to a lookup table like
+-- migrations/003 did for lead/customer statuses, so the engine self-extends.)
+--
+-- Review before running. Nothing here was executed for you.
+-- ============================================================================
+
+alter type deal_execution_status add value if not exists 'בעבודה';

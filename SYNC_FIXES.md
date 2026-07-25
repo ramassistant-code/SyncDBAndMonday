@@ -40,9 +40,12 @@
 
 **1. מיגרציות DB (הרץ ב-Supabase SQL Editor):**
 ```
-008_discount_reason.sql          -- מוסיף deals.discount_reason + credits.discount_reason
-009_control_plane_sync_fixes.sql -- מפעיל salespeople + מיפויי סיבת-הנחה (מריץ אחרי 008!)
+008_discount_reason.sql            -- מוסיף deals.discount_reason + credits.discount_reason
+009_control_plane_sync_fixes.sql   -- מפעיל salespeople + מיפויי סיבת-הנחה (מריץ אחרי 008!)
+010_salespeople_mapping_fix.sql    -- אנשי-מכירות דו-כיווני + כיבוי מיפוי role↔status השבור
 ```
+
+> **חשוב לגבי אנשי-מכירות (010):** היעד מוגדר **דו-כיווני מלא** — Replit→DB (ישיר), DB→Monday (push על `salesperson_upserted`), ו-Monday→DB (משיכה מתוזמנת + webhook). המיפוי `role↔status` **כובה** כי עמודת "סטטוס" בלוח (פעיל/לא פעיל) היא `is_active`, לא ה-enum `role` — היא הייתה מפילה את המשיכה על ה-enum ודוחפת תוויות זבל. שאר השדות (`full_name`, `phone`, `email`) מסונכרנים בשני הכיוונים. אם רוצים גם את הסטטוס פעיל/לא-פעיל — צריך מיפוי `is_active↔status` עם טרנספורם boolean→תווית (לא מיושם עדיין). **לסנכרון בזמן-אמת מ-Monday** (לא רק פעמיים ביום): להגדיר Monday webhook על לוח אנשי-המכירות → `/api/hooks/monday`.
 
 **2. פריסת הקוד** — כבר ב-`main`; Railway עושה auto-deploy. הקבצים שהשתנו:
 `server/engine/enrich.js` (חדש), `server/engine/syncSingle.js`, `server/engine/apply.js`,

@@ -5,7 +5,7 @@
 import { getFieldMappings, getTargets } from '../controlPlane.js';
 import { buildDiff } from './diff.js';
 import { tableForTarget } from './entities.js';
-import { enrichPush, hasPushConfig, makeEnrichCache } from './enrich.js';
+import { enrichPush, hasPushConfig, hasComposedTitle, makeEnrichCache } from './enrich.js';
 
 // DB columns constrained by a FK to a curated lookup table (keyed by `value`).
 // When Monday holds a status option missing from the lookup, an insert/update
@@ -175,8 +175,9 @@ export async function applyPlan({ supabase, monday, target, direction, selectedK
           if (!allowUpdate) { summary.skipped++; continue; }
           const colVals = {};
           for (const ch of row.changes) {
-            // Never overwrite the composed title with the business key on update.
-            if (ch.mondayColumnId === 'name' && hasPushConfig(target.entity_type)) continue;
+            // Never overwrite the composed title with the business key on update
+            // (composed-title entities only; salesperson name keeps syncing).
+            if (ch.mondayColumnId === 'name' && hasComposedTitle(target.entity_type)) continue;
             const f = formatForMonday(ch.to, monTypes[ch.mondayColumnId]);
             if (f !== undefined) colVals[ch.mondayColumnId] = f;
           }

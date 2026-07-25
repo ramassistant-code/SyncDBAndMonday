@@ -15,7 +15,7 @@ import { tableForTarget } from './entities.js';
 import { valuesEqual } from './compare.js';
 import { coerceForDb, formatForMonday, LOOKUP_MAP } from './apply.js';
 import { contentHash, getLink, isEcho, recordSynced } from './loopGuard.js';
-import { enrichPush, hasPushConfig } from './enrich.js';
+import { enrichPush, hasComposedTitle } from './enrich.js';
 
 const NAME_COLUMN = 'name';
 
@@ -199,8 +199,10 @@ export async function syncItemToMonday({ supabase, monday, environment, entityTy
     const colVals = {};
     for (const m of mappings) {
       // The composed title is DB-owned and written on create only — never
-      // overwrite it with the business key (deal_number/…) on update.
-      if (m.monday_column_id === NAME_COLUMN && hasPushConfig(entityType)) continue;
+      // overwrite it with the business key (deal_number/…) on update. Only for
+      // entities with a COMPOSED title (deal/payment/credit) — salesperson's
+      // title is its full_name and must keep syncing.
+      if (m.monday_column_id === NAME_COLUMN && hasComposedTitle(entityType)) continue;
       const cur = item ? cellText(item, m.monday_column_id) : null;
       if (valuesEqual(dbRow[m.source_field], cur)) continue; // unchanged
       const f = formatForMonday(dbRow[m.source_field], monTypes[m.monday_column_id]);

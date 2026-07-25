@@ -70,6 +70,13 @@ export const PUSH_CONFIG = {
       { fk: 'deal_id', parentEntity: 'deal', column: 'board_relation_mm5jv7cn' },          // 5c task → deal
     ],
   },
+  salesperson: {
+    // The board "סטטוס" column is active/inactive — map it from app_users.is_active
+    // (NOT the user_role enum). Boolean → Hebrew label.
+    computed: [
+      { column: 'status', type: 'status', build: (r) => (r.is_active === false ? 'לא פעיל' : 'פעיל') },
+    ],
+  },
 };
 
 function creditNamePart(r) {
@@ -80,6 +87,14 @@ function creditNamePart(r) {
 
 export function hasPushConfig(entityType) {
   return Boolean(PUSH_CONFIG[entityType]);
+}
+
+// True only for entities whose Monday title is a COMPOSED name (create-only,
+// DB-owned) — used to skip overwriting the title with the mapped name field on
+// update. Entities with only relations/derived/computed (salesperson,
+// coordination_task) keep syncing their name normally.
+export function hasComposedTitle(entityType) {
+  return Boolean(PUSH_CONFIG[entityType]?.title);
 }
 
 // Small per-call cache so a batch push doesn't re-query the same customer/deal/user.
@@ -166,6 +181,14 @@ export async function enrichPush({ supabase, target, dbRow, mode = 'create', cac
     if (val == null || String(val).trim() === '') continue;
     if (mode === 'update' && String(currentText(item, d.column) || '').trim() === String(val).trim()) continue; // unchanged
     out.colVals[d.column] = d.type === 'status' ? { label: String(val) } : String(val);
+  }
+
+  // computed columns → a value derived from this row itself (no join)
+  for (const c of (cfg.computed || [])) {
+    const val = c.build(dbRow);
+    if (val == null || String(val).trim() === '') continue;
+    if (mode === 'update' && String(currentText(item, c.column) || '').trim() === String(val).trim()) continue; // unchanged
+    out.colVals[c.column] = c.type === 'status' ? { label: String(val) } : String(val);
   }
 
   return out;

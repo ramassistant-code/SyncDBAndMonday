@@ -15,6 +15,7 @@ import { tableForTarget } from './entities.js';
 import { valuesEqual } from './compare.js';
 import { coerceForDb, formatForMonday, LOOKUP_MAP } from './apply.js';
 import { contentHash, getLink, isEcho, recordSynced } from './loopGuard.js';
+import { enrichPush, hasPushConfig } from './enrich.js';
 
 const NAME_COLUMN = 'name';
 
@@ -45,11 +46,6 @@ async function findTargetByBoard(supabase, environment, boardId) {
   const targets = await getTargets(supabase, environment);
   return targets.find((t) => String(t.monday_board_id) === String(boardId)) || null;
 }
-async function findTargetByEntity(supabase, environment, entityType) {
-  const targets = await getTargets(supabase, environment);
-  return targets.find((t) => t.entity_type === entityType && t.is_active !== false) || null;
-}
-
 // Insert any lookup values referenced by `changes` that are missing from their
 // curated lookup table (Monday = source of truth), mirroring apply.js.
 async function ensureLookups(supabase, entityType, changes) {
@@ -151,9 +147,12 @@ export async function syncItemFromMonday({ supabase, monday, environment, boardI
 
 // ── DB → Monday (process #4) ──────────────────────────────────────────
 export async function syncItemToMonday({ supabase, monday, environment, entityType, dbId }) {
-  const target = await findTargetByEntity(supabase, environment, entityType);
+  const targets = await getTargets(supabase, environment);
+  const target = targets.find((t) => t.entity_type === entityType && t.is_active !== false) || null;
   if (!target) return { status: 'skipped', reason: `no active target for ${entityType}` };
   if (target.outbound_enabled === false) return { status: 'skipped', reason: 'outbound disabled' };
+  // entity_type → this env's board id, to guard cross-env relation links.
+  const boardByEntity = Object.fromEntries(targets.filter((t) => t.monday_board_id).map((t) => [t.entity_type, String(t.monday_board_id)]));
 
   const { table, mappings, fields, nameField, monTypes } = await loadContext(supabase, monday, target);
   const boardId = target.monday_board_id;
@@ -182,7 +181,11 @@ export async function syncItemToMonday({ supabase, monday, environment, entityTy
       const f = formatForMonday(dbRow[m.source_field], monTypes[m.monday_column_id]);
       if (f !== undefined) colVals[m.monday_column_id] = f;
     }
-    const created = await monday.createItem(boardId, target.monday_group_id, String(dbRow[nameField] || 'ללא שם'), colVals);
+    // Composed title + board_relation links + derived columns (req 5/6/7/8).
+    const enr = await enrichPush({ supabase, target, dbRow, mode: 'create', boardByEntity });
+    Object.assign(colVals, enr.colVals);
+    const itemName = enr.title || String(dbRow[nameField] || 'ללא שם');
+    const created = await monday.createItem(boardId, target.monday_group_id, itemName, colVals);
     resultItemId = created?.id ? String(created.id) : null;
     if (resultItemId) {
       await supabase.updateById(table, dbRow.id, {
@@ -195,11 +198,18 @@ export async function syncItemToMonday({ supabase, monday, environment, entityTy
     const item = await monday.getItem(itemId);
     const colVals = {};
     for (const m of mappings) {
+      // The composed title is DB-owned and written on create only — never
+      // overwrite it with the business key (deal_number/…) on update.
+      if (m.monday_column_id === NAME_COLUMN && hasPushConfig(entityType)) continue;
       const cur = item ? cellText(item, m.monday_column_id) : null;
       if (valuesEqual(dbRow[m.source_field], cur)) continue; // unchanged
       const f = formatForMonday(dbRow[m.source_field], monTypes[m.monday_column_id]);
       if (f !== undefined) colVals[m.monday_column_id] = f;
     }
+    // Backfill board_relation links + derived columns that are missing/changed
+    // (fixes "deal opened, credits opened, but no link created").
+    const enr = await enrichPush({ supabase, target, dbRow, mode: 'update', item, boardByEntity });
+    Object.assign(colVals, enr.colVals);
     if (Object.keys(colVals).length === 0) {
       const mondayHashNow = item ? contentHash(fields, (f) => cellText(item, f.monday_column_id)) : supabaseHash;
       await recordSynced(supabase, {

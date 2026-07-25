@@ -158,6 +158,9 @@ app.post('/api/push', asyncH(async (req, res) => {
     case 'lead_upserted':
       result = await syncItemToMonday({ supabase, monday, environment, entityType: 'lead', dbId: id });
       break;
+    case 'salesperson_upserted':
+      result = await syncItemToMonday({ supabase, monday, environment, entityType: 'salesperson', dbId: id });
+      break;
     case 'deal_created':
     case 'deal_updated':
       result = await syncDealGraph({ supabase, monday, environment, dealId: id,

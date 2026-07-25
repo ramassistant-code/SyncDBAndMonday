@@ -84,7 +84,8 @@ export class MondayConnector {
   // whole board). Returns the same normalized shape as getItems, or null.
   async getItem(itemId) {
     const data = await this.execute(
-      `query($id:[ID!]){ items(ids:$id){ id name updated_at group { id title } column_values { id text value } } }`,
+      `query($id:[ID!]){ items(ids:$id){ id name updated_at group { id title }
+         column_values { id text value ... on BoardRelationValue { linked_item_ids } } } }`,
       { id: [String(itemId)] },
     );
     const it = data.items?.[0];
@@ -115,7 +116,9 @@ export class MondayConnector {
 function normalizeItem(it) {
   const columns = {};
   for (const cv of it.column_values || []) {
-    columns[cv.id] = { text: cv.text, value: cv.value };
+    // board_relation columns report text/value as null; the linked ids live in
+    // the typed field linked_item_ids (only fetched by getItem).
+    columns[cv.id] = { text: cv.text, value: cv.value, linkedIds: cv.linked_item_ids || null };
   }
   return { id: it.id, name: it.name, updated_at: it.updated_at, group: it.group, columns };
 }

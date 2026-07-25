@@ -2,9 +2,10 @@
 // Writes are type-aware: DB writes coerce to the column's Postgres type; Monday
 // writes format each value to the column's Monday type.
 
-import { getFieldMappings } from '../controlPlane.js';
+import { getFieldMappings, getTargets } from '../controlPlane.js';
 import { buildDiff } from './diff.js';
 import { tableForTarget } from './entities.js';
+import { enrichPush, hasPushConfig, makeEnrichCache } from './enrich.js';
 
 // DB columns constrained by a FK to a curated lookup table (keyed by `value`).
 // When Monday holds a status option missing from the lookup, an insert/update
@@ -74,6 +75,11 @@ export async function applyPlan({ supabase, monday, target, direction, selectedK
     lookupsAdded: 0, lookupDetails: {},
     results: [], startedAt: new Date().toISOString(),
   };
+  const enrichCache = makeEnrichCache();
+  // entity_type → this env's board id (guards cross-env relation links on push).
+  const boardByEntity = (direction === 'db_to_monday' || diff.rows.some((r) => r.writeSide === 'monday'))
+    ? Object.fromEntries((await getTargets(supabase, target.environment)).filter((t) => t.monday_board_id).map((t) => [t.entity_type, String(t.monday_board_id)]))
+    : {};
 
   // Auto-extend curated lookup tables so status values from Monday don't
   // violate FK constraints when writing to the DB.
@@ -138,14 +144,25 @@ export async function applyPlan({ supabase, monday, target, direction, selectedK
           summary.results.push({ key: row.key, op: 'update', side: 'db', name: row.name, dbId: row.dbId });
         }
       } else if (row.writeSide === 'monday') {
+        // Full DB row for enrichment (composed title, relations, derived cols).
+        const enrich = hasPushConfig(target.entity_type) && row.dbId
+          ? await fetchDbRow(supabase, table, row.dbId, enrichCache)
+          : null;
         if (row.op === 'create') {
           if (!allowCreate) { summary.skipped++; continue; }
           const colVals = {};
           for (const ch of row.changes) {
+            if (ch.mondayColumnId === 'name') continue; // composed title, not the business key
             const f = formatForMonday(ch.to, monTypes[ch.mondayColumnId]);
             if (f !== undefined) colVals[ch.mondayColumnId] = f;
           }
-          const created = await monday.createItem(boardId, target.monday_group_id, String(row.name || 'ללא שם'), colVals);
+          let itemName = String(row.name || 'ללא שם');
+          if (enrich) {
+            const enr = await enrichPush({ supabase, target, dbRow: enrich, mode: 'create', cache: enrichCache, boardByEntity });
+            Object.assign(colVals, enr.colVals);
+            if (enr.title) itemName = enr.title;
+          }
+          const created = await monday.createItem(boardId, target.monday_group_id, itemName, colVals);
           // write the new link back to the DB row
           if (row.dbId && created?.id) {
             await supabase.updateById(table, row.dbId, {
@@ -153,13 +170,25 @@ export async function applyPlan({ supabase, monday, target, direction, selectedK
             }).catch(() => {});
           }
           summary.created++;
-          summary.results.push({ key: row.key, op: 'create', side: 'monday', name: row.name, mondayItemId: created?.id });
+          summary.results.push({ key: row.key, op: 'create', side: 'monday', name: itemName, mondayItemId: created?.id });
         } else {
           if (!allowUpdate) { summary.skipped++; continue; }
           const colVals = {};
           for (const ch of row.changes) {
+            // Never overwrite the composed title with the business key on update.
+            if (ch.mondayColumnId === 'name' && hasPushConfig(target.entity_type)) continue;
             const f = formatForMonday(ch.to, monTypes[ch.mondayColumnId]);
             if (f !== undefined) colVals[ch.mondayColumnId] = f;
+          }
+          if (enrich) {
+            const item = await monday.getItem(row.mondayItemId).catch(() => null);
+            const enr = await enrichPush({ supabase, target, dbRow: enrich, mode: 'update', item, cache: enrichCache, boardByEntity });
+            Object.assign(colVals, enr.colVals);
+          }
+          if (Object.keys(colVals).length === 0) {
+            summary.skipped++;
+            summary.results.push({ key: row.key, op: 'update', side: 'monday', name: row.name, skipped: 'אין שינויים לדחיפה' });
+            continue;
           }
           await monday.changeColumnValues(boardId, row.mondayItemId, colVals);
           summary.updated++;
@@ -187,6 +216,16 @@ export async function applyPlan({ supabase, monday, target, direction, selectedK
 
   summary.finishedAt = new Date().toISOString();
   return summary;
+}
+
+// Fetch a full DB row by id (for push enrichment), memoized per apply run.
+async function fetchDbRow(supabase, table, id, cache) {
+  const key = `${table}:${id}`;
+  if (cache && cache.has(key)) return cache.get(key);
+  const rows = await supabase.select(table, { filters: [`id=eq.${id}`], limit: 1 }).catch(() => []);
+  const row = rows[0] || null;
+  if (cache) cache.set(key, row);
+  return row;
 }
 
 // ── coercion helpers ────────────────────────────────────────

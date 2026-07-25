@@ -26,6 +26,7 @@ const SYNC_ENV = process.env.SYNC_ENV || "test";
 type SyncPayload =
   | { action: "customer_upserted"; id: string }
   | { action: "lead_upserted"; id: string }
+  | { action: "salesperson_upserted"; id: string }
   | { action: "deal_created" | "deal_updated"; id: string; customerId?: string; leadId?: string };
 
 /** Notify the sync service. Never throws — a sync hiccup must not break the user's op. */
@@ -56,6 +57,13 @@ await notifySync({ action: "customer_upserted", id: customer.id });
 await notifySync({ action: "lead_upserted", id: lead.id });
 ```
 
+### איש מכירות (מסך אנשי מכירות) — אחרי INSERT או UPDATE ל-`app_users`
+במסך ניהול אנשי המכירות, מיד אחרי שמירה של רשומת `app_users` (הוספה או עדכון), שלח פניית סינכרון. השירות ידחוף/יעדכן את הפריט בלוח "אנשי מכירות" ב-Monday (שם מלא, טלפון, אימייל, סטטוס).
+```ts
+await notifySync({ action: "salesperson_upserted", id: appUser.id });
+```
+> ⚠️ חשוב שהשם המלא (`full_name`) שמור נכון — הוא משמש גם לכותרת הפריט ב-Monday וגם לעמודת הסטטוס "איש מכירות" בלוח התשלומים.
+
 ### עסקה — אחרי שכל שלבי היצירה הסתיימו (החשוב ביותר) ⚠️
 קרא **פעם אחת**, **רק אחרי** שכתבת את כל הגרף (deal + customer אם נוצר + lead אם קושר + payments + credits + coordination_tasks). השירות קורא בעצמו את הילדים לפי `deal_id`, אז לא צריך לשלוח אותם — רק לוודא שהם כבר ב-DB:
 ```ts
@@ -77,7 +85,14 @@ await notifySync({ action: "deal_updated", id: deal.id });
 |---|---|
 | `customer_upserted` | לוח לקוחות (כולל פרטי חשבונית) |
 | `lead_upserted` | לוח לידים |
-| `deal_created` / `deal_updated` | **cascade:** עסקה + לקוח + ליד + כל התשלומים/קרדיטים/משימות-תיאום של העסקה |
+| `salesperson_upserted` | לוח אנשי מכירות (שם מלא, טלפון, אימייל, סטטוס) |
+| `deal_created` / `deal_updated` | **cascade:** עסקה + לקוח + ליד + כל התשלומים/קרדיטים/משימות-תיאום של העסקה, כולל קשרים (relations) וכותרות מורכבות |
+
+## שדות חדשים שכדאי שהטופס ימלא (סינכרון אוטומטי ל-Monday אחרי הרצת המיגרציות)
+- **`deals.discount_reason`** — סיבת הנחה ברמת הצעת המחיר → עמודת "סיבת הנחה" בלוח העסקאות.
+- **`credits.discount_reason`** — סיבת הנחה ברמת הרכיב → עמודת "סיבת הנחה" בלוח הקרדיטים.
+- **`credits.salesperson_note`** — הערת איש המכירות בזמן הצעת המחיר (למחלקת אופרציה) → כבר מסונכרן לעמודת "הערה מאיש מכירות בזמן הצעת מחיר".
+- הכותרות ב-Monday (עסקה/תשלום/קרדיט) נבנות אוטומטית ע"י השירות בתבנית `שם לקוח | תאריך ושעה [| שם רכיב x כמות]` — **אין צורך** שהטופס יקבע אותן; המספר העסקי (deal_number/…) נשאר ב-DB בלבד.
 
 - אם לרשומה עדיין אין פריט Monday → השירות **יוצר** פריט וכותב בחזרה את `monday_item_id` ל-DB.
 - אם כבר יש → **מעדכן** רק שדות שהשתנו.

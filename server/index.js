@@ -119,14 +119,20 @@ app.post('/api/dedup/apply', asyncH(async (req, res) => {
   res.json(await applyDedup({ supabase, entity: req.body.entity || 'customers', selectedKeys: req.body.selectedKeys || null }));
 }));
 
-// ── Monday webhook receiver (CodeWords processes #1/#2) ───────────────
-// Monday → DB for one item, real-time. Handles the challenge handshake and
-// accepts either Monday's native {event:{boardId,pulseId}} or a normalized
-// {boardId,itemId} (e.g. relayed by CodeWords).
-// POST /api/hooks/monday { env?, challenge?, event?, boardId?, itemId? }
+// ── Monday webhook receiver (real-time Monday → DB) ───────────────────
+// Register the Monday webhook URL as:
+//   /api/hooks/monday?env=test&token=<MONDAY_HOOK_TOKEN>
+// The `env` query param routes to the right environment (test|production) so the
+// same solution works for prod — just register the prod boards with env=production.
+// `token` protects this otherwise-open endpoint against forged events.
+// Handles Monday's challenge handshake and its {event:{boardId,pulseId}} payload.
 app.post('/api/hooks/monday', asyncH(async (req, res) => {
+  const requiredToken = process.env.MONDAY_HOOK_TOKEN;
+  if (requiredToken && req.query.token !== requiredToken) {
+    return res.status(401).json({ error: 'invalid webhook token' });
+  }
   if (req.body && req.body.challenge) return res.json({ challenge: req.body.challenge });
-  const env = requireConfigured(getEnvironment(req.body.env || 'test'));
+  const env = requireConfigured(getEnvironment(req.query.env || req.body.env || 'test'));
   const ev = req.body.event || {};
   const boardId = req.body.boardId || ev.boardId;
   const itemId = req.body.itemId || ev.pulseId || ev.itemId;

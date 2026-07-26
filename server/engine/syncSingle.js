@@ -18,6 +18,10 @@ import { contentHash, getLink, isEcho, recordSynced } from './loopGuard.js';
 import { enrichPush, hasComposedTitle } from './enrich.js';
 
 const NAME_COLUMN = 'name';
+// Entities whose "name" column maps to a system running-number (deal_number /
+// payment_number) — never overwrite those from Monday's display name on update.
+// For customers/leads/salespeople/credits the name IS the real name → sync it.
+const NAME_INBOUND_SKIP = new Set(['deal', 'payment']);
 
 function cellText(item, colId) {
   if (colId === NAME_COLUMN) return item.name;
@@ -94,7 +98,7 @@ export async function syncItemFromMonday({ supabase, monday, environment, boardI
 
   // Build field changes (Monday text → DB column).
   const changes = fields
-    .filter((f) => f.monday_column_id !== NAME_COLUMN || dbRow == null)
+    .filter((f) => f.monday_column_id !== NAME_COLUMN || dbRow == null || !NAME_INBOUND_SKIP.has(target.entity_type))
     .map((f) => ({ field: f.source_field, to: cellText(item, f.monday_column_id) }));
 
   await ensureLookups(supabase, target.entity_type, changes);

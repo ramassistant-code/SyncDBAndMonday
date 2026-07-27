@@ -15,7 +15,7 @@ import { tableForTarget } from './entities.js';
 import { valuesEqual } from './compare.js';
 import { coerceForDb, formatForMonday, LOOKUP_MAP } from './apply.js';
 import { contentHash, getLink, isEcho, recordSynced } from './loopGuard.js';
-import { syncProductComponentFromMonday } from './productComponents.js';
+import { syncProductComponentFromMonday, syncProductComponentToMonday } from './productComponents.js';
 import { enrichPush, hasComposedTitle } from './enrich.js';
 
 const NAME_COLUMN = 'name';
@@ -158,6 +158,10 @@ export async function syncItemFromMonday({ supabase, monday, environment, boardI
 
 // ── DB → Monday (process #4) ──────────────────────────────────────────
 export async function syncItemToMonday({ supabase, monday, environment, entityType, dbId }) {
+  // The product<->component junction needs relation writing, not the generic path.
+  if (entityType === 'deal_product') {
+    return syncProductComponentToMonday({ supabase, monday, environment, dbId });
+  }
   const targets = await getTargets(supabase, environment);
   const target = targets.find((t) => t.entity_type === entityType && t.is_active !== false) || null;
   if (!target) return { status: 'skipped', reason: `no active target for ${entityType}` };

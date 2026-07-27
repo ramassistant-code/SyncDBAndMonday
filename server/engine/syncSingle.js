@@ -15,6 +15,7 @@ import { tableForTarget } from './entities.js';
 import { valuesEqual } from './compare.js';
 import { coerceForDb, formatForMonday, LOOKUP_MAP } from './apply.js';
 import { contentHash, getLink, isEcho, recordSynced } from './loopGuard.js';
+import { syncProductComponentFromMonday } from './productComponents.js';
 import { enrichPush, hasComposedTitle } from './enrich.js';
 
 const NAME_COLUMN = 'name';
@@ -80,6 +81,12 @@ export async function syncItemFromMonday({ supabase, monday, environment, boardI
   const target = await findTargetByBoard(supabase, environment, boardId);
   if (!target) return { status: 'skipped', reason: `no target for board ${boardId}` };
   if (target.inbound_enabled === false) return { status: 'skipped', reason: 'inbound disabled' };
+
+  // The product<->component junction needs relation resolution, not the generic
+  // scalar-field path. Delegate to its dedicated handler.
+  if (target.entity_type === 'deal_product') {
+    return syncProductComponentFromMonday({ supabase, monday, itemId });
+  }
 
   const item = await monday.getItem(itemId);
   if (!item) return { status: 'skipped', reason: 'monday item not found' };

@@ -85,7 +85,7 @@ export async function syncItemFromMonday({ supabase, monday, environment, boardI
   // The product<->component junction needs relation resolution, not the generic
   // scalar-field path. Delegate to its dedicated handler.
   if (target.entity_type === 'deal_product') {
-    return syncProductComponentFromMonday({ supabase, monday, itemId });
+    return syncProductComponentFromMonday({ supabase, monday, environment, itemId });
   }
 
   const item = await monday.getItem(itemId);

@@ -207,7 +207,12 @@ app.post('/api/sync/full', asyncH(async (req, res) => {
   }
   const { supabase, monday } = connectorsFor(env);
   let targets = await getTargets(supabase, env.controlPlaneEnv);
-  targets = targets.filter((t) => t.is_active !== false && t.inbound_enabled !== false);
+  // The product<->component junction (deal_product) has no scalar `name`/columns
+  // to diff — its identity is a pair of board-relations. It is kept in sync by
+  // the dedicated real-time handler (productComponents.js), NOT the generic
+  // monday_to_db diff. Excluding it here prevents the scheduled sync from
+  // erroring on "column product_components.name does not exist".
+  targets = targets.filter((t) => t.is_active !== false && t.inbound_enabled !== false && t.entity_type !== 'deal_product');
   if (Array.isArray(req.body.targetKeys) && req.body.targetKeys.length) {
     const want = new Set(req.body.targetKeys);
     targets = targets.filter((t) => want.has(t.target_key));

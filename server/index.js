@@ -8,7 +8,7 @@ import { buildDiff } from './engine/diff.js';
 import { applyPlan } from './engine/apply.js';
 import { buildAlignment, applyAlignment } from './engine/align.js';
 import { buildDedup, applyDedup } from './engine/dedup.js';
-import { syncItemFromMonday, syncItemToMonday, syncDealGraph } from './engine/syncSingle.js';
+import { syncItemFromMonday, syncItemToMonday, syncDealGraph, softDeleteFromMonday } from './engine/syncSingle.js';
 import { apiKeyAuth } from './auth.js';
 
 // ── Crash resilience ──────────────────────────────────────────────────
@@ -152,6 +152,13 @@ app.post('/api/hooks/monday', asyncH(async (req, res) => {
   const itemId = req.body.itemId || ev.pulseId || ev.itemId;
   if (!boardId || !itemId) return res.status(400).json({ error: 'missing boardId/itemId' });
   const { supabase, monday } = connectorsFor(env);
+  // Delete/archive in Monday → logical (soft) delete in the DB, preserving FK
+  // relationships. Everything else → normal upsert.
+  const eventType = ev.type || req.body.type;
+  if (eventType === 'item_deleted' || eventType === 'item_archived') {
+    const result = await softDeleteFromMonday({ supabase, environment: env.controlPlaneEnv, boardId, itemId });
+    return res.json({ env: env.key, event: eventType, ...result });
+  }
   const result = await syncItemFromMonday({ supabase, monday, environment: env.controlPlaneEnv, boardId, itemId });
   res.json({ env: env.key, ...result });
 }));

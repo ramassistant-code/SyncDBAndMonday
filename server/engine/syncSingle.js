@@ -156,6 +156,30 @@ export async function syncItemFromMonday({ supabase, monday, environment, boardI
   return { status: 'ok', op, side: 'db', entity: target.entity_type, dbId: dbRow.id, itemId };
 }
 
+// ── Monday item deleted / archived → soft-delete the DB row ───────────
+// Logical delete only: set deleted_at so foreign-key relationships from other
+// entities stay intact — NO hard delete, NO cascade. Tables without a
+// deleted_at column (e.g. deal_coordination_tasks) are skipped.
+export async function softDeleteFromMonday({ supabase, environment, boardId, itemId }) {
+  const target = await findTargetByBoard(supabase, environment, boardId);
+  if (!target) return { status: 'skipped', reason: `no target for board ${boardId}` };
+  const table = tableForTarget(target);
+  const schema = await supabase.introspect();
+  const cols = new Set((schema[table] || []).map((c) => c.name));
+  if (!cols.has('deleted_at')) return { status: 'skipped', reason: `${table} has no deleted_at (soft-delete unsupported)` };
+
+  const rows = await supabase.select(table, {
+    columns: 'id,deleted_at',
+    filters: [`monday_board_id=eq.${boardId}`, `monday_item_id=eq.${itemId}`], limit: 1,
+  });
+  const row = rows[0];
+  if (!row) return { status: 'skipped', reason: 'no DB row linked to the deleted/archived item' };
+  if (row.deleted_at) return { status: 'skipped', reason: 'already soft-deleted' };
+
+  await supabase.updateById(table, row.id, { deleted_at: new Date().toISOString() });
+  return { status: 'ok', op: 'soft_delete', entity: target.entity_type, table, dbId: row.id, itemId };
+}
+
 // ── DB → Monday (process #4) ──────────────────────────────────────────
 export async function syncItemToMonday({ supabase, monday, environment, entityType, dbId }) {
   // The product<->component junction needs relation writing, not the generic path.

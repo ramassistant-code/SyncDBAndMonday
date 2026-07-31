@@ -11,6 +11,20 @@ import { buildDedup, applyDedup } from './engine/dedup.js';
 import { syncItemFromMonday, syncItemToMonday, syncDealGraph } from './engine/syncSingle.js';
 import { apiKeyAuth } from './auth.js';
 
+// ── Crash resilience ──────────────────────────────────────────────────
+// A webhook receiver must not die from a single unhandled async error —
+// one bad Monday event, a fire-and-forget DB write that rejects, or a
+// transient network failure. Under modern Node these otherwise terminate
+// the process (→ Railway restart + crash email). Log for diagnosis and
+// keep serving. Each request is independent (no shared mutable state a
+// stray rejection could corrupt), so continuing is safe.
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+});
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '5mb' }));

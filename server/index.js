@@ -154,8 +154,12 @@ app.post('/api/hooks/monday', asyncH(async (req, res) => {
   const { supabase, monday } = connectorsFor(env);
   // Delete/archive in Monday → logical (soft) delete in the DB, preserving FK
   // relationships. Everything else → normal upsert.
+  // NOTE: Monday DELIVERS these with legacy payload type names
+  // (delete_pulse / archive_pulse), not the registration names
+  // (item_deleted / item_archived) — accept both.
   const eventType = ev.type || req.body.type;
-  if (eventType === 'item_deleted' || eventType === 'item_archived') {
+  const REMOVAL_EVENTS = new Set(['item_deleted', 'delete_pulse', 'item_archived', 'archive_pulse']);
+  if (REMOVAL_EVENTS.has(eventType)) {
     const result = await softDeleteFromMonday({ supabase, environment: env.controlPlaneEnv, boardId, itemId });
     return res.json({ env: env.key, event: eventType, ...result });
   }

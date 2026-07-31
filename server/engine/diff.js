@@ -4,7 +4,7 @@
 // direction: 'monday_to_db' | 'db_to_monday' | 'bidirectional'
 
 import { getFieldMappings } from '../controlPlane.js';
-import { tableForTarget } from './entities.js';
+import { tableForTarget, filtersForTarget } from './entities.js';
 import { valuesEqual, norm } from './compare.js';
 
 const NAME_COLUMN = 'name'; // Monday's built-in item title column id
@@ -32,9 +32,9 @@ export async function buildDiff({ supabase, monday, target, direction }) {
   ])).join(',');
 
   const [dbRows, mondayItems, boardMeta] = await Promise.all([
-    supabase.select(table, { columns: dbColumns, filters: ['deleted_at=is.null'], order: 'created_at' }).catch(async (e) => {
+    supabase.select(table, { columns: dbColumns, filters: ['deleted_at=is.null', ...filtersForTarget(target)], order: 'created_at' }).catch(async (e) => {
       // some tables have no deleted_at
-      if (/deleted_at/.test(e.message)) return supabase.select(table, { columns: dbColumns });
+      if (/deleted_at/.test(e.message)) return supabase.select(table, { columns: dbColumns, filters: filtersForTarget(target) });
       throw e;
     }),
     monday.getItems(boardId),

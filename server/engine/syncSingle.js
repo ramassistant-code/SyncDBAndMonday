@@ -11,7 +11,7 @@
 // far-side write that follows is recognised as an echo and the loop stops.
 
 import { getTargets, getFieldMappings } from '../controlPlane.js';
-import { tableForTarget } from './entities.js';
+import { tableForTarget, filtersForTarget } from './entities.js';
 import { valuesEqual } from './compare.js';
 import { coerceForDb, formatForMonday, LOOKUP_MAP } from './apply.js';
 import { contentHash, getLink, isEcho, recordSynced } from './loopGuard.js';
@@ -172,9 +172,11 @@ export async function syncItemToMonday({ supabase, monday, environment, entityTy
   const { table, mappings, fields, nameField, monTypes } = await loadContext(supabase, monday, target);
   const boardId = target.monday_board_id;
 
-  const rows = await supabase.select(table, { filters: [`id=eq.${dbId}`], limit: 1 });
+  // filtersForTarget guards salespeople: a non-sales app_users row won't match,
+  // so it is skipped rather than pushed to the salespeople board.
+  const rows = await supabase.select(table, { filters: [`id=eq.${dbId}`, ...filtersForTarget(target)], limit: 1 });
   const dbRow = rows[0];
-  if (!dbRow) return { status: 'skipped', reason: 'db row not found' };
+  if (!dbRow) return { status: 'skipped', reason: `db row not found (or excluded by entity filter) for ${entityType} id ${dbId}` };
 
   const supabaseHash = contentHash(fields, (f) => dbRow[f.source_field]);
   const linkedHere = dbRow.monday_board_id && String(dbRow.monday_board_id) === String(boardId) && dbRow.monday_item_id;

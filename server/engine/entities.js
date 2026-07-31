@@ -23,3 +23,16 @@ export function tableForTarget(target) {
   }
   return t;
 }
+
+// Optional per-entity row filter (PostgREST predicates) restricting WHICH rows
+// of the base table an entity is allowed to sync. `app_users` holds ALL app
+// users; only role='sales' are salespeople — admin/editor/office_manager/…
+// must never reach the salespeople board. Applied at every DB→Monday
+// row-selection site (single push, batch diff, alignment).
+export const ENTITY_FILTER = {
+  salesperson: ['role=eq.sales'],
+};
+
+export function filtersForTarget(target) {
+  return ENTITY_FILTER[target.entity_type] || [];
+}

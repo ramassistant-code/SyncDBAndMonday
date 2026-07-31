@@ -7,7 +7,7 @@
 // production-seeded row); otherwise flag the item for manual review.
 
 import { getFieldMappings } from '../controlPlane.js';
-import { tableForTarget } from './entities.js';
+import { tableForTarget, filtersForTarget } from './entities.js';
 import { normalizePhone, normalizeEmail, normalizeName } from './compare.js';
 
 const MATCH_KEYS = {
@@ -67,8 +67,8 @@ export async function buildAlignment({ supabase, monday, target }) {
 
   const [dbRows, items] = await Promise.all([
     colNames.has('deleted_at')
-      ? supabase.select(table, { columns: dbColumns, filters: ['deleted_at=is.null'] })
-      : supabase.select(table, { columns: dbColumns }),
+      ? supabase.select(table, { columns: dbColumns, filters: ['deleted_at=is.null', ...filtersForTarget(target)] })
+      : supabase.select(table, { columns: dbColumns, filters: filtersForTarget(target) }),
     monday.getItems(boardId),
   ]);
 

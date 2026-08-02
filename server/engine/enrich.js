@@ -43,8 +43,23 @@ const joinTitle = (parts) => parts.filter((p) => p != null && String(p).trim() !
 export const PUSH_CONFIG = {
   deal: {
     title: { build: (r, ctx) => joinTitle([ctx.customer, fmtDateTime(r.created_at)]) },
-    relations: [],
-    derived: [],
+    relations: [
+      { fk: 'lead_id', parentEntity: 'lead', column: 'board_relation_mm3twpfx' },   // deal → lead ("לידים")
+    ],
+    derived: [
+      // "איש מכירות" status = the deal's salesperson full name (label created if
+      // missing — same pattern as payment). Only fires when deals.salesperson_id
+      // is set; it is NOT populated on most deals today (upstream/app gap).
+      { fk: 'salesperson_id', table: 'app_users', field: 'full_name', column: 'color_mktwdp8c', type: 'status' },
+    ],
+  },
+  customer: {
+    // "ליד מקושר": mirror customers.lead_id → the originating lead's Monday item.
+    // Backfilled on update, so an already-created customer gets linked on its next
+    // push — provided the lead itself is already in Monday (has a monday_item_id).
+    relations: [
+      { fk: 'lead_id', parentEntity: 'lead', column: 'board_relation_mkzm5f4f' },   // customer → lead
+    ],
   },
   payment: {
     title: { build: (r, ctx) => joinTitle([ctx.customer, fmtDateTime(r.created_at)]) },

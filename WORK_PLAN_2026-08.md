@@ -18,7 +18,7 @@
 **גם קובץ:** `migrations/011_enable_products_components_inbound.sql`
 
 - ✅ **A1 (test):** הורץ `migration 011` (env='test'). אומת חי — הלוחות כעת is_active/inbound/outbound=true, השדות ברשימת הסנכרון.
-- ⬜ **A2 (test) — אימות קצה‑לקצה:** לערוך אחד השדות ב‑Monday בלוח מוצרים/רכיבים (test), ולוודא שהערך נכנס לעמודה ב‑DB. (כרגע Monday ו‑DB תואמים, אז אין דלתא — צריך ליצור שינוי אמיתי כדי לראות זרימה.)
+- ✅ **A2 (test) — אימות קצה‑לקצה:** בוצע 2026-08-02. עריכת "הערות למוצר ברמת הצעת מחיר" ב‑Monday (מוצר "מכונת אורגני פרימיום") → `syncItemFromMonday` ok/update → הערך נכנס ל‑`products.quote_notes_default`; שוחזר למקור נקי.
 - ⬜ **A3 (production) — הרצת SQL:** להריץ ב‑BIST‑PROD:
   ```sql
   UPDATE public.monday_export_targets

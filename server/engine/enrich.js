@@ -61,6 +61,14 @@ export const PUSH_CONFIG = {
       { fk: 'lead_id', parentEntity: 'lead', column: 'board_relation_mkzm5f4f' },   // customer → lead
     ],
   },
+  lead: {
+    // "איש מכירות": mirror leads.salesperson_id → the salesperson's Monday item on
+    // the salespeople board (board_relation). No composed title → the lead's name
+    // keeps syncing normally. Paired with INBOUND_RELATIONS.lead for Monday→DB.
+    relations: [
+      { fk: 'salesperson_id', parentEntity: 'salesperson', column: 'board_relation_mky9akx2' }, // lead → salesperson
+    ],
+  },
   payment: {
     title: { build: (r, ctx) => joinTitle([ctx.customer, fmtDateTime(r.created_at)]) },
     relations: [
@@ -98,6 +106,54 @@ function creditNamePart(r) {
   const name = r.credit_name || r.parent_product_name;
   if (name && r.quantity != null && String(r.quantity).trim() !== '') return `${name} x ${r.quantity}`;
   return name || '';
+}
+
+// Monday→DB counterpart to PUSH_CONFIG.relations: resolve a child item's
+// board_relation columns to the DB FK column, by matching the linked Monday item
+// to a parent DB row via its monday_item_id. Same board_relation column ids as
+// the outbound relations, read in the reverse direction. The generic scalar path
+// cannot do this — board_relation reports text/value=null; only the typed
+// `linked_item_ids` (via getItem) carries the link.
+export const INBOUND_RELATIONS = {
+  payment: [
+    { fk: 'deal_id', parentEntity: 'deal', column: 'board_relation_mktnjr7z' },          // עסקה מקושרת
+    { fk: 'salesperson_id', parentEntity: 'salesperson', column: 'board_relation_mm5js0ns' }, // לינק איש מכירות
+  ],
+  lead: [
+    { fk: 'salesperson_id', parentEntity: 'salesperson', column: 'board_relation_mky9akx2' }, // איש מכירות
+  ],
+};
+
+export function hasInboundRelations(entityType) {
+  return Boolean(INBOUND_RELATIONS[entityType]);
+}
+
+// Resolve inbound board_relation columns of `item` to DB FK values for `entityType`.
+// Returns { <fk>: <parentDbId> } for each relation that is NON-EMPTY in Monday AND
+// resolves to a parent row on THIS environment's board (via boardByEntity guard).
+// An empty relation is skipped (never nulls the FK — clearing a link in Monday
+// does not wipe the DB FK, mirroring the outbound "never clear" guard). The caller
+// diffs against the current row and only writes changed FKs (idempotent).
+export async function resolveInboundRelations({ supabase, entityType, item, boardByEntity = null }) {
+  const rels = INBOUND_RELATIONS[entityType];
+  const out = {};
+  if (!rels || !item) return out;
+  for (const rel of rels) {
+    const linkedIds = currentRelationIds(item, rel.column);
+    if (!linkedIds.length) continue;                       // relation empty → leave FK untouched
+    const table = ENTITY_TABLE[rel.parentEntity];
+    if (!table) continue;
+    const parentItemId = String(linkedIds[0]);
+    const filters = [`monday_item_id=eq.${parentItemId}`, 'deleted_at=is.null'];
+    // Board guard: only match a parent linked to THIS env's board for its entity,
+    // else the item id belongs to another environment (drift) and is invalid here.
+    if (boardByEntity && boardByEntity[rel.parentEntity]) {
+      filters.push(`monday_board_id=eq.${boardByEntity[rel.parentEntity]}`);
+    }
+    const rows = await supabase.select(table, { columns: 'id', filters, limit: 1 }).catch(() => []);
+    if (rows[0]) out[rel.fk] = rows[0].id;
+  }
+  return out;
 }
 
 export function hasPushConfig(entityType) {

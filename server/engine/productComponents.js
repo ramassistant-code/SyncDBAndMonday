@@ -120,13 +120,24 @@ export async function syncProductComponentFromMonday({ supabase, monday, environ
   if (!prod) return { status: 'skipped', reason: `product not aligned (monday item ${pItem})` };
   if (!comp) return { status: 'skipped', reason: `component not aligned (monday item ${cItem})` };
 
-  const patch = { default_quantity: qty, sort_order: sort, monday_board_id: cfg.pcBoard, monday_item_id: String(itemId) };
+  // product_id/component_id are part of the patch so that CHANGING which product or
+  // component is linked on the Monday junction item (a "re-parent") updates the DB
+  // FKs — not just qty/sort. Without this, a relation change in Monday found the row
+  // by monday_item_id and silently kept the old product_id/component_id.
+  const patch = { product_id: prod.id, component_id: comp.id, default_quantity: qty, sort_order: sort, monday_board_id: cfg.pcBoard, monday_item_id: String(itemId) };
   let dbRow = await one(supabase, 'product_components', [`monday_item_id=eq.${itemId}`, 'deleted_at=is.null']);
   if (!dbRow) dbRow = (await supabase.select('product_components', { columns: 'id', filters: [`product_id=eq.${prod.id}`, `component_id=eq.${comp.id}`, 'deleted_at=is.null'], order: 'created_at', limit: 1 }))[0];
 
   let op, dbId;
-  if (dbRow) { await supabase.updateById('product_components', dbRow.id, patch); op = 'update'; dbId = dbRow.id; }
-  else {
+  if (dbRow) {
+    try { await supabase.updateById('product_components', dbRow.id, patch); }
+    catch (e) {
+      // A re-parent whose new (product_id, component_id) already exists on another row.
+      if (/duplicate key|unique/i.test(e.message)) return { status: 'skipped', reason: 're-parent collides with existing pair: ' + e.message };
+      throw e;
+    }
+    op = 'update'; dbId = dbRow.id;
+  } else {
     try { const c = await supabase.insert('product_components', [{ product_id: prod.id, component_id: comp.id, ...patch }]); op = 'create'; dbId = c && c[0] && c[0].id; }
     catch (e) { return { status: 'skipped', reason: 'create failed: ' + e.message }; }
   }

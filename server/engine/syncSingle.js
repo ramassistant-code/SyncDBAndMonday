@@ -16,7 +16,7 @@ import { valuesEqual } from './compare.js';
 import { coerceForDb, formatForMonday, LOOKUP_MAP } from './apply.js';
 import { contentHash, getLink, isEcho, recordSynced } from './loopGuard.js';
 import { syncProductComponentFromMonday, syncProductComponentToMonday } from './productComponents.js';
-import { enrichPush, hasComposedTitle } from './enrich.js';
+import { enrichPush, hasComposedTitle, resolveInboundRelations } from './enrich.js';
 
 const NAME_COLUMN = 'name';
 // Entities whose "name" column maps to a system running-number (deal_number /
@@ -78,7 +78,8 @@ async function ensureLookups(supabase, entityType, changes) {
 
 // ── Monday → DB (processes #1/#2) ─────────────────────────────────────
 export async function syncItemFromMonday({ supabase, monday, environment, boardId, itemId }) {
-  const target = await findTargetByBoard(supabase, environment, boardId);
+  const targets = await getTargets(supabase, environment);
+  const target = targets.find((t) => String(t.monday_board_id) === String(boardId)) || null;
   if (!target) return { status: 'skipped', reason: `no target for board ${boardId}` };
   if (target.inbound_enabled === false) return { status: 'skipped', reason: 'inbound disabled' };
 
@@ -93,22 +94,41 @@ export async function syncItemFromMonday({ supabase, monday, environment, boardI
 
   const { table, fields, dbTypes, notNull } = await loadContext(supabase, monday, target);
 
-  // Echo check: is this webhook just the reflection of a write we made?
+  // Echo check: is this webhook just the reflection of a scalar write we made?
   const mondayHash = contentHash(fields, (f) => cellText(item, f.monday_column_id));
   const link = await getLink(supabase, { environment, entityType: target.entity_type, boardId, itemId });
-  if (isEcho(link, 'monday', mondayHash)) return { status: 'skipped', reason: 'echo' };
+  const scalarEcho = isEcho(link, 'monday', mondayHash);
 
   const linked = await supabase.select(table, {
     filters: [`monday_board_id=eq.${boardId}`, `monday_item_id=eq.${itemId}`], limit: 1,
   });
   let dbRow = linked[0] || null;
 
-  // Build field changes (Monday text → DB column).
-  const changes = fields
+  // Inbound board_relation → FK resolution (payment→deal/salesperson, lead→salesperson).
+  // Runs even on a scalar echo: linking a deal to an already-created payment leaves
+  // the scalars unchanged, so relation changes must not be suppressed by the echo
+  // guard. Idempotent — only FKs that actually change are written.
+  const boardByEntity = Object.fromEntries(
+    targets.filter((t) => t.monday_board_id).map((t) => [t.entity_type, String(t.monday_board_id)]),
+  );
+  const resolvedRel = await resolveInboundRelations({ supabase, entityType: target.entity_type, item, boardByEntity });
+  const relPatch = {};
+  for (const [fk, val] of Object.entries(resolvedRel)) {
+    if (!dbRow || !valuesEqual(dbRow[fk], val)) relPatch[fk] = val;
+  }
+
+  // True echo with no relation change → nothing to do.
+  if (dbRow && scalarEcho && Object.keys(relPatch).length === 0) {
+    return { status: 'skipped', reason: 'echo' };
+  }
+
+  // Build scalar field changes (Monday text → DB column). Skipped on a scalar echo
+  // (the scalars already match what we last wrote) — only relations are applied then.
+  const changes = scalarEcho ? [] : fields
     .filter((f) => f.monday_column_id !== NAME_COLUMN || dbRow == null || !NAME_INBOUND_SKIP.has(target.entity_type))
     .map((f) => ({ field: f.source_field, to: cellText(item, f.monday_column_id) }));
 
-  await ensureLookups(supabase, target.entity_type, changes);
+  if (changes.length) await ensureLookups(supabase, target.entity_type, changes);
 
   let op;
   if (!dbRow) {
@@ -119,6 +139,7 @@ export async function syncItemFromMonday({ supabase, monday, environment, boardI
       if (v === null && notNull.has(ch.field)) continue;
       record[ch.field] = v;
     }
+    Object.assign(record, relPatch); // resolved parent FKs (deal_id, salesperson_id, …)
     record.monday_board_id = String(boardId);
     record.monday_item_id = String(itemId);
     const created = await supabase.insert(table, [record]);
@@ -132,6 +153,7 @@ export async function syncItemFromMonday({ supabase, monday, environment, boardI
       if (v === null && notNull.has(ch.field)) continue;
       patch[ch.field] = v;
     }
+    Object.assign(patch, relPatch); // backfill/re-parent resolved FKs
     if (Object.keys(patch).length === 0) {
       // Nothing to write, but remember the hashes so future echoes are caught.
       await recordSynced(supabase, {
@@ -176,8 +198,27 @@ export async function softDeleteFromMonday({ supabase, environment, boardId, ite
   if (!row) return { status: 'skipped', reason: 'no DB row linked to the deleted/archived item' };
   if (row.deleted_at) return { status: 'skipped', reason: 'already soft-deleted' };
 
-  await supabase.updateById(table, row.id, { deleted_at: new Date().toISOString() });
-  return { status: 'ok', op: 'soft_delete', entity: target.entity_type, table, dbId: row.id, itemId };
+  const now = new Date().toISOString();
+  await supabase.updateById(table, row.id, { deleted_at: now });
+
+  // Catalog cascade: a product↔component junction row has no meaning once one of
+  // its parents is gone. Deleting a product or component in Monday therefore also
+  // soft-deletes its product_components links, so the product stops showing the
+  // deleted component. This cascade is CATALOG-ONLY — financial entities
+  // (deal/payment/credit) keep the no-cascade rule to preserve FK history.
+  let cascaded = 0;
+  const CATALOG_CASCADE = { product: 'product_id', component_operation: 'component_id' };
+  const fk = CATALOG_CASCADE[target.entity_type];
+  if (fk) {
+    const links = await supabase.select('product_components', {
+      columns: 'id', filters: [`${fk}=eq.${row.id}`, 'deleted_at=is.null'],
+    }).catch(() => []);
+    for (const l of links) {
+      await supabase.updateById('product_components', l.id, { deleted_at: now });
+      cascaded++;
+    }
+  }
+  return { status: 'ok', op: 'soft_delete', entity: target.entity_type, table, dbId: row.id, itemId, cascaded };
 }
 
 // ── DB → Monday (process #4) ──────────────────────────────────────────

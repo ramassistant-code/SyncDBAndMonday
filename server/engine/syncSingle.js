@@ -20,7 +20,11 @@ import { enrichPush, hasComposedTitle, resolveInboundRelations } from './enrich.
 
 const NAME_COLUMN = 'name';
 // Entities whose "name" column maps to a system running-number (deal_number /
-// payment_number) — never overwrite those from Monday's display name on update.
+// payment_number) — never take those from Monday's display name, on create OR
+// update. On create the DB default (make_business_number) generates the real
+// running number; letting Monday's name land in deal_number both pollutes it and
+// collides with the UNIQUE(deal_number) constraint whenever two Monday items
+// share a display name, silently dropping the second item's inbound insert.
 // For customers/leads/salespeople/credits the name IS the real name → sync it.
 const NAME_INBOUND_SKIP = new Set(['deal', 'payment']);
 
@@ -125,7 +129,7 @@ export async function syncItemFromMonday({ supabase, monday, environment, boardI
   // Build scalar field changes (Monday text → DB column). Skipped on a scalar echo
   // (the scalars already match what we last wrote) — only relations are applied then.
   const changes = scalarEcho ? [] : fields
-    .filter((f) => f.monday_column_id !== NAME_COLUMN || dbRow == null || !NAME_INBOUND_SKIP.has(target.entity_type))
+    .filter((f) => f.monday_column_id !== NAME_COLUMN || !NAME_INBOUND_SKIP.has(target.entity_type))
     .map((f) => ({ field: f.source_field, to: cellText(item, f.monday_column_id) }));
 
   if (changes.length) await ensureLookups(supabase, target.entity_type, changes);

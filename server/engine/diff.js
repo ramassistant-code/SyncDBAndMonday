@@ -6,6 +6,7 @@
 import { getFieldMappings } from '../controlPlane.js';
 import { tableForTarget, filtersForTarget } from './entities.js';
 import { valuesEqual, norm } from './compare.js';
+import { hasComposedTitle } from './enrich.js';
 
 const NAME_COLUMN = 'name'; // Monday's built-in item title column id
 
@@ -18,11 +19,25 @@ export async function buildDiff({ supabase, monday, target, direction }) {
   }
 
   const table = tableForTarget(target);
-  const mappings = (await getFieldMappings(supabase, target.id))
+  const allMappings = (await getFieldMappings(supabase, target.id))
     .filter((m) => m.source_field && m.monday_column_id);
+  // For entities whose Monday title is a COMPOSED, DB-owned name (deal/payment/
+  // credit → "customer | date …"), the `name` column must never be diffed: the
+  // composed title never equals the business number (deal_number/…), so every
+  // linked row would churn as an update whose only change is `name`, which
+  // apply.js then drops → counted as "skipped" (this is the 1712 skipped seen in
+  // the scheduled sync). Excluding it here removes the churn AND stops a batch
+  // inbound CREATE from writing the composed title into the business-number
+  // field (same class of bug as commit e455820 fixed for the real-time path).
+  const mappings = hasComposedTitle(target.entity_type)
+    ? allMappings.filter((m) => m.monday_column_id !== NAME_COLUMN)
+    : allMappings;
 
-  // The DB column that maps to Monday's title, used for names on create.
-  const nameMap = mappings.find((m) => m.monday_column_id === NAME_COLUMN);
+  // The DB column that maps to Monday's title, used for names on create/display.
+  // Resolve from the FULL mapping set (allMappings) — even when the composed-title
+  // filter above drops `name` from the diff, we still need its DB field
+  // (deal_number/…) to fetch the column and label rows.
+  const nameMap = allMappings.find((m) => m.monday_column_id === NAME_COLUMN);
   const nameField = nameMap ? nameMap.source_field : 'name';
 
   // Columns we need from the DB.

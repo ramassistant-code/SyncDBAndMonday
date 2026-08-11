@@ -86,7 +86,13 @@ export const PUSH_CONFIG = {
     relations: [
       { fk: 'deal_id', parentEntity: 'deal', column: 'board_relation_mkv7apeh' },          // 5a credit → deal
     ],
-    derived: [],
+    derived: [
+      // internal_note from the ORIGINATING quote component → "הערה מאיש מכירות בזמן הצעת מחיר".
+      // The engine reads quote_components directly via credits.source_quote_component_id
+      // (the credit table has no note column of its own). DB→Monday only; overrides the
+      // legacy salesperson_note field-mapping for this column (enrich runs after mappings).
+      { fk: 'source_quote_component_id', table: 'quote_components', field: 'internal_note', column: 'long_text_mkvcfdhq', type: 'long_text' },
+    ],
   },
   coordination_task: {
     relations: [

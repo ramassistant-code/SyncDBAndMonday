@@ -236,8 +236,15 @@ app.post('/api/sync/full', asyncH(async (req, res) => {
     try {
       const summary = await applyPlan({ supabase, monday, target, direction: 'monday_to_db', selectedKeys: null });
       for (const k of Object.keys(totals)) totals[k] += summary[k] || 0;
+      // Surface the per-record failure detail (key + error) so the scheduled sync
+      // and its n8n failure email can name WHICH record failed — previously only
+      // the counts were returned and summary.results was discarded, so `failed:1`
+      // was undiagnosable.
+      const failures = (summary.results || []).filter((r) => r.error)
+        .map((r) => ({ key: r.key, op: r.op, name: r.name, error: r.error }));
       perTarget.push({ target: target.target_key, ok: true,
-        created: summary.created, updated: summary.updated, skipped: summary.skipped, failed: summary.failed });
+        created: summary.created, updated: summary.updated, skipped: summary.skipped, failed: summary.failed,
+        ...(failures.length ? { failures } : {}) });
     } catch (e) {
       perTarget.push({ target: target.target_key, ok: false, error: e.message });
     }

@@ -23,7 +23,7 @@ const normalizers = { phone: normalizePhone, email: normalizeEmail, name: normal
 
 // Relational children matched by amount + the customer name in the item title.
 const COMPOSITE = {
-  deal: { amountFields: ['total_amount_including_vat', 'total_amount'], amountMapField: 'total_amount_including_vat' },
+  deal: { amountFields: ['total_amount', 'total_amount_including_vat'], amountMapField: 'total_amount' },
   payment: { amountFields: ['amount_paid'], amountMapField: 'amount_paid' },
 };
 

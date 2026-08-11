@@ -211,6 +211,9 @@ export async function applyPlan({ supabase, monday, target, direction, selectedK
       } else {
         summary.failed++;
         summary.results.push({ key: row.key, op: row.op, side: row.writeSide, name: row.name, error: msg });
+        // Log real failures so a scheduled/background run leaves a trace of WHICH
+        // record failed and why (the counts alone are undiagnosable).
+        console.error(`[apply] FAILED ${target.target_key} ${row.op} key=${row.key} name=${row.name || ''}: ${msg}`);
       }
     }
   }

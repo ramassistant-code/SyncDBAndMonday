@@ -1,0 +1,14 @@
+-- migrations/014_add_payment_status_needs_payment.sql
+-- Adds the payment status "צריך תשלום" (needs payment) to the deal_payment_status
+-- enum. A Monday deal (item 3151828137 "עסקה חדשה") carried this label, which was
+-- absent from the enum → the inbound sync raised "invalid input value for enum
+-- deal_payment_status". That is NOT a structural error (not-null/FK/unique), so
+-- apply.js counted it as failed → the n8n `failed:1` alert on the deal board.
+--
+-- Unlike lead/customer status columns (curated lookup TABLES the engine
+-- auto-extends), deal payment/execution statuses are Postgres ENUMS and cannot be
+-- auto-extended at write time — a new Monday label must be added here explicitly.
+--
+-- Idempotent. ADD VALUE cannot run inside a transaction on some setups, so this
+-- runs as a single autocommit statement (no BEGIN/COMMIT).
+ALTER TYPE public.deal_payment_status ADD VALUE IF NOT EXISTS 'צריך תשלום';

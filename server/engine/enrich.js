@@ -91,7 +91,10 @@ export const PUSH_CONFIG = {
       // The engine reads quote_components directly via credits.source_quote_component_id
       // (the credit table has no note column of its own). DB→Monday only; overrides the
       // legacy salesperson_note field-mapping for this column (enrich runs after mappings).
-      { fk: 'source_quote_component_id', table: 'quote_components', field: 'internal_note', column: 'long_text_mkvcfdhq', type: 'long_text' },
+      // That FK is never written by the app, so `fallback` resolves the same row the
+      // long way — see quoteComponentNote().
+      { fk: 'source_quote_component_id', table: 'quote_components', field: 'internal_note',
+        column: 'long_text_mkvcfdhq', type: 'long_text', fallback: quoteComponentNote },
     ],
   },
   coordination_task: {
@@ -107,6 +110,47 @@ export const PUSH_CONFIG = {
     ],
   },
 };
+
+// Resolve a credit's originating quote component WITHOUT credits.source_quote_component_id.
+// The app never populates that FK (0 of 1119 prod credits have it) — what it does write
+// is the catalog pair the credit was generated from (source_product_id +
+// source_component_id) plus deals.quote_id. Walk that path instead:
+//   credit → deals.quote_id → quote_products (same source_product_id)
+//          → quote_components (same source_component_id) → internal_note
+// Scoping to the product line matters: the same component can appear under two
+// different products in one quote, each with its own note.
+async function quoteComponentNote({ supabase, dbRow, cache }) {
+  if (!dbRow.source_component_id || !dbRow.deal_id) return null;
+  const deal = await fetchRow(supabase, cache, 'deals', dbRow.deal_id, 'id,quote_id');
+  if (!deal?.quote_id) return null;
+
+  const products = await supabase.select('quote_products', {
+    columns: 'id,source_product_id',
+    filters: [`quote_id=eq.${deal.quote_id}`, 'deleted_at=is.null'],
+  }).catch(() => []);
+  if (!products.length) return null;
+  // Prefer the line for the same catalog product; if the credit doesn't say which
+  // product it came from, search every line of the quote.
+  const scoped = dbRow.source_product_id
+    ? products.filter((p) => String(p.source_product_id) === String(dbRow.source_product_id))
+    : [];
+  const ids = (scoped.length ? scoped : products).map((p) => `"${p.id}"`).join(',');
+
+  const comps = await supabase.select('quote_components', {
+    columns: 'id,internal_note,quantity',
+    filters: [
+      `quote_product_id=in.(${ids})`,
+      `source_component_id=eq.${dbRow.source_component_id}`,
+      'deleted_at=is.null',
+    ],
+  }).catch(() => []);
+
+  const withNote = comps.filter((r) => r.internal_note && String(r.internal_note).trim() !== '');
+  if (!withNote.length) return null;
+  // Same component twice on one line is rare — prefer the row whose quantity matches.
+  const exact = withNote.find((r) => Number(r.quantity) === Number(dbRow.quantity));
+  return (exact || withNote[0]).internal_note;
+}
 
 function creditNamePart(r) {
   const name = r.credit_name || r.parent_product_name;
@@ -251,10 +295,17 @@ export async function enrichPush({ supabase, target, dbRow, mode = 'create', cac
 
   // derived joined values → status label / text
   for (const d of (cfg.derived || [])) {
+    let val = null;
     const fkVal = dbRow[d.fk];
-    if (!fkVal) continue;
-    const row = await fetchRow(supabase, cache, d.table, fkVal, `id,${d.field}`);
-    const val = row?.[d.field];
+    if (fkVal) {
+      const row = await fetchRow(supabase, cache, d.table, fkVal, `id,${d.field}`);
+      val = row?.[d.field] ?? null;
+    }
+    // The direct FK is the fast path; when the app doesn't populate it, a
+    // resolver may reach the same value through the relations it does write.
+    if ((val == null || String(val).trim() === '') && d.fallback) {
+      val = await d.fallback({ supabase, dbRow, cache });
+    }
     if (val == null || String(val).trim() === '') continue;
     if (mode === 'update' && String(currentText(item, d.column) || '').trim() === String(val).trim()) continue; // unchanged
     out.colVals[d.column] = d.type === 'status' ? { label: String(val) } : String(val);

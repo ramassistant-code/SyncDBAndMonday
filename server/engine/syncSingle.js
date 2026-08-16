@@ -16,7 +16,7 @@ import { valuesEqual } from './compare.js';
 import { coerceForDb, formatForMonday, LOOKUP_MAP } from './apply.js';
 import { contentHash, getLink, isEcho, isEnrichEcho, recordSynced, valuesHash } from './loopGuard.js';
 import { syncProductComponentFromMonday, syncProductComponentToMonday } from './productComponents.js';
-import { enrichPush, hasComposedTitle, resolveInboundRelations } from './enrich.js';
+import { enrichPush, hasComposedTitle, resolveInboundInherited, resolveInboundRelations } from './enrich.js';
 
 const NAME_COLUMN = 'name';
 // Entities whose "name" column maps to a system running-number (deal_number /
@@ -120,6 +120,15 @@ export async function syncItemFromMonday({ supabase, monday, environment, boardI
   for (const [fk, val] of Object.entries(resolvedRel)) {
     if (!dbRow || !valuesEqual(dbRow[fk], val)) relPatch[fk] = val;
   }
+
+  // Fields the child inherits from that parent (payment → deal's customer /
+  // salesperson). The payments board carries no customer column, so without this
+  // a Monday-created payment reaches the DB with customer_id NULL. Filled here
+  // rather than left to the app: same event, same write. Fills empty fields only.
+  const inherited = await resolveInboundInherited({
+    supabase, entityType: target.entity_type, dbRow, resolved: resolvedRel,
+  });
+  for (const [f, val] of Object.entries(inherited)) relPatch[f] = val;
 
   // True echo with no relation change → nothing to do.
   if (dbRow && scalarEcho && Object.keys(relPatch).length === 0) {

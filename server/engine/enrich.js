@@ -178,6 +178,37 @@ export function hasInboundRelations(entityType) {
   return Boolean(INBOUND_RELATIONS[entityType]);
 }
 
+// Fields a child INHERITS from its parent when the child's own value is empty.
+// A payment created in Monday carries only the "עסקה מקושרת" link: the board has
+// no customer column at all, and its salesperson column is optional. Resolving
+// deal_id therefore left customer_id/salesperson_id NULL on every Monday-created
+// payment (1698 live rows before migration 015), which the app needs. The deal
+// already holds both, so take them from there.
+export const INBOUND_INHERIT = {
+  payment: { parentFk: 'deal_id', parentTable: 'deals', fields: ['customer_id', 'salesperson_id'] },
+};
+
+// Values to inherit from the parent row for ONE inbound child.
+// `resolved` is the FK map just resolved from the board_relation columns; the
+// parent is looked up there first (create: the row does not exist yet) and then
+// on the existing row. Only NULL/empty child fields are filled — a payment that
+// carries its own customer keeps it — and only from a parent that actually has a
+// value, so this never writes NULL over anything.
+export async function resolveInboundInherited({ supabase, entityType, dbRow, resolved = {}, cache }) {
+  const cfg = INBOUND_INHERIT[entityType];
+  const out = {};
+  if (!cfg) return out;
+  const parentId = resolved[cfg.parentFk] || (dbRow ? dbRow[cfg.parentFk] : null);
+  if (!parentId) return out;
+  const parent = await fetchRow(supabase, cache, cfg.parentTable, parentId, ['id', ...cfg.fields].join(','));
+  if (!parent) return out;
+  for (const f of cfg.fields) {
+    if (dbRow && dbRow[f]) continue;   // child already has its own value
+    if (parent[f]) out[f] = parent[f];
+  }
+  return out;
+}
+
 // Resolve inbound board_relation columns of `item` to DB FK values for `entityType`.
 // Returns { <fk>: <parentDbId> } for each relation that is NON-EMPTY in Monday AND
 // resolves to a parent row on THIS environment's board (via boardByEntity guard).

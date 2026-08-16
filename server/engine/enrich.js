@@ -261,9 +261,15 @@ const currentText = (item, colId) => {
 // child to a parent item that lives on a DIFFERENT board (cross-env drift): a
 // dev payment must not get a prod salesperson's item id. When omitted, links are
 // written whenever the parent has any monday_item_id.
+// `out.fingerprint` carries every enriched value this row RESOLVES TO, including
+// the ones `colVals` drops because Monday already holds them. colVals is a delta
+// (what to write now); the fingerprint is state (what the DB says this item's
+// enriched columns should be). Only the latter is stable enough to hash for the
+// echo guard — see loopGuard.valuesHash. The composed title is deliberately left
+// out: it is written on create only, so a change to it must not force pushes.
 export async function enrichPush({ supabase, target, dbRow, mode = 'create', cache, item = null, boardByEntity = null }) {
   const cfg = PUSH_CONFIG[target.entity_type];
-  const out = { title: null, colVals: {} };
+  const out = { title: null, colVals: {}, fingerprint: {} };
   if (!cfg) return out;
 
   // customer name for the composed title
@@ -289,6 +295,7 @@ export async function enrichPush({ supabase, target, dbRow, mode = 'create', cac
     if (boardByEntity && boardByEntity[rel.parentEntity] &&
         String(parent.monday_board_id) !== String(boardByEntity[rel.parentEntity])) continue;
     const parentItemId = Number(parent.monday_item_id);
+    out.fingerprint[rel.column] = { item_ids: [parentItemId] };
     if (mode === 'update' && currentRelationIds(item, rel.column).includes(parentItemId)) continue; // already linked
     out.colVals[rel.column] = { item_ids: [parentItemId] };
   }
@@ -307,6 +314,7 @@ export async function enrichPush({ supabase, target, dbRow, mode = 'create', cac
       val = await d.fallback({ supabase, dbRow, cache });
     }
     if (val == null || String(val).trim() === '') continue;
+    out.fingerprint[d.column] = String(val);
     if (mode === 'update' && String(currentText(item, d.column) || '').trim() === String(val).trim()) continue; // unchanged
     out.colVals[d.column] = d.type === 'status' ? { label: String(val) } : String(val);
   }
@@ -315,6 +323,7 @@ export async function enrichPush({ supabase, target, dbRow, mode = 'create', cac
   for (const c of (cfg.computed || [])) {
     const val = c.build(dbRow);
     if (val == null || String(val).trim() === '') continue;
+    out.fingerprint[c.column] = String(val);
     if (mode === 'update' && String(currentText(item, c.column) || '').trim() === String(val).trim()) continue; // unchanged
     out.colVals[c.column] = c.type === 'status' ? { label: String(val) } : String(val);
   }

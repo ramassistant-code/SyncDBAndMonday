@@ -35,6 +35,30 @@ export function contentHash(fields, getValue) {
   return crypto.createHash('sha256').update(JSON.stringify(pairs)).digest('hex');
 }
 
+// Canonical hash of the ENRICHED values a push resolves (board_relation links,
+// derived joins, computed columns) — see enrich.js `fingerprint`.
+//
+// These live OUTSIDE the mapped-field tuple that contentHash() covers: they are
+// read from joined tables (a credit's note comes from quote_components, a
+// payment's salesperson name from app_users), so a change to one leaves every
+// mapped field untouched and contentHash identical. Without this second hash the
+// echo guard reads such a push as "nothing changed" and skips it, and the new
+// value never reaches Monday.
+export function valuesHash(values) {
+  const pairs = Object.entries(values || {})
+    .map(([k, v]) => [k, v == null ? null : (typeof v === 'object' ? JSON.stringify(v) : norm(v))])
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return crypto.createHash('sha256').update(JSON.stringify(pairs)).digest('hex');
+}
+
+// Are the enriched values unchanged since our last write? Mirrors isEcho: with no
+// stored hash (a link written before this guard existed, or by the inbound path)
+// the answer is false, so the first push after deploy goes through and backfills.
+export function isEnrichEcho(link, incomingHash) {
+  const stored = link && link.sync_state ? link.sync_state.enrich_hash : null;
+  return Boolean(stored) && stored === incomingHash;
+}
+
 // Read the stored link (hashes + metadata) for one item, or null.
 export async function getLink(supabase, { environment, entityType, boardId, itemId }) {
   const rows = await supabase.select(LINK_TABLE, {
@@ -62,7 +86,7 @@ export function isEcho(link, side, incomingHash) {
 export async function recordSynced(supabase, {
   environment, entityType, boardId, itemId,
   targetId = null, sourceRecordId = null, source,
-  mondayHash, supabaseHash, runId = null,
+  mondayHash, supabaseHash, enrichHash = null, runId = null,
 }) {
   const now = new Date().toISOString();
   const patch = {
@@ -76,6 +100,10 @@ export async function recordSynced(supabase, {
   if (runId) patch.last_run_id = runId;
 
   const existing = await getLink(supabase, { environment, entityType, boardId, itemId });
+  // The enriched-values hash rides in the existing `sync_state` jsonb (no schema
+  // change). Only the push path computes it; the inbound path passes null and
+  // must leave whatever is stored alone.
+  if (enrichHash) patch.sync_state = { ...(existing?.sync_state || {}), enrich_hash: enrichHash };
   if (existing) return supabase.updateById(LINK_TABLE, existing.id, patch);
   // `deal_id` is a NOT-NULL generic record-id column (legacy name); the seeded
   // rows set it equal to source_record_id, so we mirror that convention.

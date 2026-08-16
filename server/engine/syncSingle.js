@@ -14,7 +14,7 @@ import { getTargets, getFieldMappings } from '../controlPlane.js';
 import { tableForTarget, filtersForTarget } from './entities.js';
 import { valuesEqual } from './compare.js';
 import { coerceForDb, formatForMonday, LOOKUP_MAP } from './apply.js';
-import { contentHash, getLink, isEcho, recordSynced } from './loopGuard.js';
+import { contentHash, getLink, isEcho, isEnrichEcho, recordSynced, valuesHash } from './loopGuard.js';
 import { syncProductComponentFromMonday, syncProductComponentToMonday } from './productComponents.js';
 import { enrichPush, hasComposedTitle, resolveInboundRelations } from './enrich.js';
 
@@ -251,14 +251,9 @@ export async function syncItemToMonday({ supabase, monday, environment, entityTy
   const linkedHere = dbRow.monday_board_id && String(dbRow.monday_board_id) === String(boardId) && dbRow.monday_item_id;
   const itemId = linkedHere ? String(dbRow.monday_item_id) : null;
 
-  // Echo check on the DB side (only meaningful for an already-linked row).
-  if (itemId) {
-    const link = await getLink(supabase, { environment, entityType, boardId, itemId });
-    if (isEcho(link, 'supabase', supabaseHash)) return { status: 'skipped', reason: 'echo' };
-  }
-
   let resultItemId = itemId;
   let op;
+  let enrichHash = null;
   if (!itemId) {
     if (target.create_enabled === false) return { status: 'skipped', reason: 'create disabled' };
     const colVals = {};
@@ -270,6 +265,7 @@ export async function syncItemToMonday({ supabase, monday, environment, entityTy
     // Composed title + board_relation links + derived columns (req 5/6/7/8).
     const enr = await enrichPush({ supabase, target, dbRow, mode: 'create', boardByEntity });
     Object.assign(colVals, enr.colVals);
+    enrichHash = valuesHash(enr.fingerprint);
     const itemName = enr.title || String(dbRow[nameField] || 'ללא שם');
     const created = await monday.createItem(boardId, target.monday_group_id, itemName, colVals);
     resultItemId = created?.id ? String(created.id) : null;
@@ -282,6 +278,21 @@ export async function syncItemToMonday({ supabase, monday, environment, entityTy
   } else {
     // Update only changed columns (fetch current item to diff).
     const item = await monday.getItem(itemId);
+
+    // Backfill board_relation links + derived columns that are missing/changed
+    // (fixes "deal opened, credits opened, but no link created"). Resolved BEFORE
+    // the echo check because the guard needs its fingerprint — an enriched value
+    // read from a joined table (a credit's quote note, a payment's salesperson)
+    // changes without touching any mapped field, and skipping on the mapped hash
+    // alone would strand it in the DB.
+    const enr = await enrichPush({ supabase, target, dbRow, mode: 'update', item, boardByEntity });
+    enrichHash = valuesHash(enr.fingerprint);
+
+    const link = await getLink(supabase, { environment, entityType, boardId, itemId });
+    if (isEcho(link, 'supabase', supabaseHash) && isEnrichEcho(link, enrichHash)) {
+      return { status: 'skipped', reason: 'echo' };
+    }
+
     const colVals = {};
     for (const m of mappings) {
       // The composed title is DB-owned and written on create only — never
@@ -294,16 +305,13 @@ export async function syncItemToMonday({ supabase, monday, environment, entityTy
       const f = formatForMonday(dbRow[m.source_field], monTypes[m.monday_column_id]);
       if (f !== undefined) colVals[m.monday_column_id] = f;
     }
-    // Backfill board_relation links + derived columns that are missing/changed
-    // (fixes "deal opened, credits opened, but no link created").
-    const enr = await enrichPush({ supabase, target, dbRow, mode: 'update', item, boardByEntity });
     Object.assign(colVals, enr.colVals);
     if (Object.keys(colVals).length === 0) {
       const mondayHashNow = item ? contentHash(fields, (f) => cellText(item, f.monday_column_id)) : supabaseHash;
       await recordSynced(supabase, {
         environment, entityType, boardId, itemId,
         targetId: target.id, sourceRecordId: dbRow.id, source: 'supabase',
-        mondayHash: mondayHashNow, supabaseHash,
+        mondayHash: mondayHashNow, supabaseHash, enrichHash,
       });
       return { status: 'noop', itemId };
     }
@@ -319,7 +327,7 @@ export async function syncItemToMonday({ supabase, monday, environment, entityTy
   await recordSynced(supabase, {
     environment, entityType, boardId, itemId: resultItemId,
     targetId: target.id, sourceRecordId: dbRow.id, source: 'supabase',
-    mondayHash, supabaseHash,
+    mondayHash, supabaseHash, enrichHash,
   });
   return { status: 'ok', op, side: 'monday', entity: entityType, dbId: dbRow.id, itemId: resultItemId };
 }

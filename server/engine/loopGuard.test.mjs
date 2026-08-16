@@ -5,7 +5,7 @@
 // Run: node server/engine/loopGuard.test.mjs
 
 import assert from 'node:assert';
-import { contentHash, isEcho } from './loopGuard.js';
+import { contentHash, isEcho, isEnrichEcho, valuesHash } from './loopGuard.js';
 
 const fields = [
   { monday_column_id: 'name', source_field: 'name' },
@@ -70,3 +70,26 @@ assert.equal(isEcho({ last_monday_hash: null }, 'monday', hashMonday()), false, 
 
 console.log('✓ loopGuard: genuine changes propagate once, echoes suppressed, loop terminates');
 console.log(`  final: dbWrites=${dbWrites} mondayWrites=${mondayWrites}`);
+
+// ── Enriched values: the second hash the push guard checks ─────────────
+// A credit's salesperson note comes from a JOINED table, so editing it leaves
+// every mapped field (and therefore contentHash) identical. Only valuesHash
+// moves — which is what lets the push through.
+const enrichBefore = { long_text_mkvcfdhq: 'כתוביות כתומות', board_relation_mkv7apeh: { item_ids: [123] } };
+const enrichAfter = { long_text_mkvcfdhq: 'כתוביות אדומות', board_relation_mkv7apeh: { item_ids: [123] } };
+
+const pushed = { last_supabase_hash: hashDb(), sync_state: { enrich_hash: valuesHash(enrichBefore) } };
+assert.equal(isEcho(pushed, 'supabase', hashDb()), true, 'mapped fields unchanged → mapped hash says echo');
+assert.equal(isEnrichEcho(pushed, valuesHash(enrichBefore)), true, 'same enriched values → echo');
+assert.equal(isEnrichEcho(pushed, valuesHash(enrichAfter)), false, 'edited note → NOT an echo, push must proceed');
+
+// Key order must not matter, and a missing/legacy hash must never suppress.
+assert.equal(
+  valuesHash({ a: '1', b: '2' }), valuesHash({ b: '2', a: '1' }),
+  'fingerprint hash is order-independent',
+);
+assert.equal(isEnrichEcho(null, valuesHash(enrichBefore)), false, 'unknown item is never an enrich echo');
+assert.equal(isEnrichEcho({ sync_state: {} }, valuesHash(enrichBefore)), false, 'link written before this guard existed → not an echo (backfills)');
+assert.equal(isEnrichEcho({}, valuesHash(enrichBefore)), false, 'missing sync_state → not an echo');
+
+console.log('✓ loopGuard: enriched-value changes defeat the echo guard; legacy links backfill once');

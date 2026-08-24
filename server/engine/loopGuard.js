@@ -108,6 +108,31 @@ export async function recordSynced(supabase, {
   // `deal_id` is a NOT-NULL generic record-id column (legacy name); the seeded
   // rows set it equal to source_record_id, so we mirror that convention.
   const recordId = sourceRecordId == null ? null : String(sourceRecordId);
+
+  // The record may already hold a link row pointing at a DIFFERENT item (its
+  // Monday item was re-created, or a duplicate create beat us to it). The table
+  // is UNIQUE(target_id, entity_type, source_record_id), so inserting a second
+  // row throws and the whole sync is reported as failed — re-point the existing
+  // row at the item we just synced instead.
+  if (targetId && recordId) {
+    const prior = await supabase.select(LINK_TABLE, {
+      filters: [
+        `target_id=eq.${targetId}`,
+        `entity_type=eq.${entityType}`,
+        `source_record_id=eq.${recordId}`,
+      ],
+      limit: 1,
+    }).catch(() => []);
+    if (prior[0]) {
+      return supabase.updateById(LINK_TABLE, prior[0].id, {
+        ...patch,
+        monday_board_id: String(boardId),
+        monday_item_id: String(itemId),
+        idempotency_key: idemKey(entityType, boardId, itemId),
+      });
+    }
+  }
+
   return supabase.insert(LINK_TABLE, [{
     idempotency_key: idemKey(entityType, boardId, itemId),
     environment,

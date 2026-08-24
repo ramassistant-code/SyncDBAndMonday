@@ -17,6 +17,7 @@ import { coerceForDb, formatForMonday, LOOKUP_MAP } from './apply.js';
 import { contentHash, getLink, isEcho, isEnrichEcho, recordSynced, valuesHash } from './loopGuard.js';
 import { syncProductComponentFromMonday, syncProductComponentToMonday } from './productComponents.js';
 import { enrichPush, hasComposedTitle, resolveInboundInherited, resolveInboundRelations } from './enrich.js';
+import { findLinkedItem, withRecordLock } from './pushGuard.js';
 
 const NAME_COLUMN = 'name';
 // Entities whose "name" column maps to a system running-number (deal_number /
@@ -240,6 +241,13 @@ export async function syncItemToMonday({ supabase, monday, environment, entityTy
   if (entityType === 'deal_product') {
     return syncProductComponentToMonday({ supabase, monday, environment, dbId });
   }
+  // Serialise pushes of the SAME record: the create path is a check-then-create
+  // whose middle (enrichment + createItem) takes seconds, and two overlapping
+  // cascades of one deal would otherwise each create an item for every child.
+  return withRecordLock(`${environment}:${entityType}:${dbId}`, () => pushRecordToMonday({ supabase, monday, environment, entityType, dbId }));
+}
+
+async function pushRecordToMonday({ supabase, monday, environment, entityType, dbId }) {
   const targets = await getTargets(supabase, environment);
   const target = targets.find((t) => t.entity_type === entityType && t.is_active !== false) || null;
   if (!target) return { status: 'skipped', reason: `no active target for ${entityType}` };
@@ -258,7 +266,21 @@ export async function syncItemToMonday({ supabase, monday, environment, entityTy
 
   const supabaseHash = contentHash(fields, (f) => dbRow[f.source_field]);
   const linkedHere = dbRow.monday_board_id && String(dbRow.monday_board_id) === String(boardId) && dbRow.monday_item_id;
-  const itemId = linkedHere ? String(dbRow.monday_item_id) : null;
+  let itemId = linkedHere ? String(dbRow.monday_item_id) : null;
+
+  // The row says "no item yet" — but the link table is the authority on what we
+  // already created for it. A write-back that failed (or a concurrent push in
+  // another instance) must not turn into a second Monday item; adopt the
+  // existing one and repair the row instead.
+  if (!itemId) {
+    const adopted = await findLinkedItem({ supabase, monday, target, entityType, dbId: dbRow.id, boardId });
+    if (adopted) {
+      itemId = adopted;
+      await supabase.updateById(table, dbRow.id, {
+        monday_board_id: String(boardId), monday_item_id: adopted,
+      }).catch(() => {});
+    }
+  }
 
   let resultItemId = itemId;
   let op;
@@ -279,9 +301,11 @@ export async function syncItemToMonday({ supabase, monday, environment, entityTy
     const created = await monday.createItem(boardId, target.monday_group_id, itemName, colVals);
     resultItemId = created?.id ? String(created.id) : null;
     if (resultItemId) {
+      // A lost write-back is what turns the NEXT push into a duplicate item —
+      // never swallow it silently.
       await supabase.updateById(table, dbRow.id, {
         monday_board_id: String(boardId), monday_item_id: resultItemId,
-      }).catch(() => {});
+      }).catch((e) => console.error(`[push] link write-back FAILED ${entityType} ${dbRow.id} → item ${resultItemId}: ${e.message}`));
     }
     op = 'create';
   } else {

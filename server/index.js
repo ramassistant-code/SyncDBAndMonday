@@ -25,6 +25,7 @@ process.on('uncaughtException', (err) => {
   console.error('[uncaughtException]', err);
 });
 
+const STARTED_AT = new Date().toISOString();
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '5mb' }));
@@ -253,6 +254,13 @@ app.post('/api/sync/full', asyncH(async (req, res) => {
     finishedAt: new Date().toISOString(), targetsRun: targets.length, totals, perTarget });
 }));
 
-app.get('/api/health', (req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
+// `commit` comes from Railway's build-time git metadata — it makes "is my fix
+// actually live?" answerable without guessing from behaviour.
+app.get('/api/health', (req, res) => res.json({
+  ok: true,
+  ts: new Date().toISOString(),
+  commit: (process.env.RAILWAY_GIT_COMMIT_SHA || 'unknown').slice(0, 7),
+  startedAt: STARTED_AT,
+}));
 
 app.listen(PORT, () => console.log(`SyncDBAndMonday API on http://localhost:${PORT}`));

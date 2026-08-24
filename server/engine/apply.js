@@ -6,6 +6,7 @@ import { getFieldMappings, getTargets } from '../controlPlane.js';
 import { buildDiff } from './diff.js';
 import { tableForTarget } from './entities.js';
 import { enrichPush, hasPushConfig, hasComposedTitle, makeEnrichCache } from './enrich.js';
+import { findLinkedItem } from './pushGuard.js';
 
 // DB columns constrained by a FK to a curated lookup table (keyed by `value`).
 // When Monday holds a status option missing from the lookup, an insert/update
@@ -150,6 +151,22 @@ export async function applyPlan({ supabase, monday, target, direction, selectedK
           : null;
         if (row.op === 'create') {
           if (!allowCreate) { summary.skipped++; continue; }
+          // The row looks unlinked, but the link table may already hold an item
+          // for it (a write-back that failed, or a real-time push that created it
+          // while this batch was running). Repair the link instead of creating a
+          // twin — the next diff then sees a linked row and updates it.
+          const already = await findLinkedItem({
+            supabase, monday, target, entityType: target.entity_type, dbId: row.dbId, boardId,
+          });
+          if (already) {
+            await supabase.updateById(table, row.dbId, {
+              monday_board_id: String(boardId), monday_item_id: already,
+            }).catch(() => {});
+            summary.skipped++;
+            summary.results.push({ key: row.key, op: 'create', side: 'monday', name: row.name,
+              skipped: `הרשומה כבר מקושרת לפריט ${already} — הקישור תוקן במקום יצירת כפילות`, mondayItemId: already });
+            continue;
+          }
           const colVals = {};
           for (const ch of row.changes) {
             if (ch.mondayColumnId === 'name') continue; // composed title, not the business key

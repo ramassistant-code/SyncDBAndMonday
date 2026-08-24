@@ -343,7 +343,7 @@ export async function syncItemToMonday({ supabase, monday, environment, entityTy
 
 // ── Deal cascade (process #4c: deal_created) ──────────────────────────
 // Pushes the deal graph the app just wrote: deal + customer (if created) +
-// lead (if relinked) + payments + credits + coordination tasks.
+// the deal's lead + payments + credits + coordination tasks.
 export async function syncDealGraph({ supabase, monday, environment, dealId, includeCustomerId, includeLeadId }) {
   const out = [];
   const push = async (entityType, id) => {
@@ -354,7 +354,20 @@ export async function syncDealGraph({ supabase, monday, environment, dealId, inc
 
   await push('deal', dealId);
   await push('customer', includeCustomerId);
-  await push('lead', includeLeadId);
+
+  // The lead ALWAYS rides the cascade: the caller may name it (includeLeadId),
+  // but the app doesn't pass it — in production not one lead had ever been pushed
+  // DB→Monday (787/787 links last_source='monday'). So resolve deals.lead_id
+  // ourselves. This is what carries the "deal opened → 'לקוח פעיל'" status
+  // (migration 016) to Monday: DB→Monday runs on THIS path only, and the
+  // scheduled sync is Monday→DB, so an unpushed status is overwritten on the
+  // next pull instead of reaching the board.
+  let leadId = includeLeadId;
+  if (!leadId) {
+    const rows = await supabase.select('deals', { columns: 'lead_id', filters: [`id=eq.${dealId}`], limit: 1 }).catch(() => []);
+    leadId = rows[0]?.lead_id || null;
+  }
+  await push('lead', leadId);
 
   // Children linked by deal_id.
   for (const [entityType, childTable] of [['payment', 'payments'], ['credit', 'credits'], ['coordination_task', 'deal_coordination_tasks']]) {

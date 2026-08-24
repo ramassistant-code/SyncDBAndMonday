@@ -16,7 +16,7 @@ import { valuesEqual } from './compare.js';
 import { coerceForDb, formatForMonday, LOOKUP_MAP } from './apply.js';
 import { contentHash, getLink, isEcho, isEnrichEcho, recordSynced, valuesHash } from './loopGuard.js';
 import { syncProductComponentFromMonday, syncProductComponentToMonday } from './productComponents.js';
-import { enrichPush, hasComposedTitle, resolveInboundInherited, resolveInboundRelations } from './enrich.js';
+import { creditNameFromTitle, enrichPush, hasComposedTitle, resolveInboundInherited, resolveInboundRelations } from './enrich.js';
 import { findLinkedItem, withRecordLock } from './pushGuard.js';
 
 const NAME_COLUMN = 'name';
@@ -33,6 +33,14 @@ function cellText(item, colId) {
   if (colId === NAME_COLUMN) return item.name;
   const c = item.columns[colId];
   return c ? c.text : null;
+}
+
+// Monday cell → the value the DB column should hold. Only the credit title needs
+// reshaping: it is a composed LABEL on the board, while credits.credit_name holds
+// the component's own name. See creditNameFromTitle — free-text titles pass through.
+function inboundValue(entityType, mondayColumnId, text) {
+  if (entityType === 'credit' && mondayColumnId === NAME_COLUMN) return creditNameFromTitle(text);
+  return text;
 }
 
 // Resolve everything needed to sync one target: mappings, hashable field list,
@@ -140,7 +148,8 @@ export async function syncItemFromMonday({ supabase, monday, environment, boardI
   // (the scalars already match what we last wrote) — only relations are applied then.
   const changes = scalarEcho ? [] : fields
     .filter((f) => f.monday_column_id !== NAME_COLUMN || !NAME_INBOUND_SKIP.has(target.entity_type))
-    .map((f) => ({ field: f.source_field, to: cellText(item, f.monday_column_id) }));
+    .map((f) => ({ field: f.source_field,
+      to: inboundValue(target.entity_type, f.monday_column_id, cellText(item, f.monday_column_id)) }));
 
   if (changes.length) await ensureLookups(supabase, target.entity_type, changes);
 

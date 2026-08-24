@@ -158,6 +158,28 @@ function creditNamePart(r) {
   return name || '';
 }
 
+// ── Monday title → credit name (the inverse of the two composed formats) ──
+// A credit's Monday title is a LABEL, not its name: ours reads
+// "customer | 2026-08-24 18:46 | עריכת שורט סטנדרט x 4", and the ones the app
+// writes read "customer | עריכת שורט סטנדרט - 4 | 2026-08-24". Feeding that
+// label straight back into credits.credit_name (the `name` mapping is
+// bidirectional) overwrote the real component name on 1,062 of 1,169 live
+// production rows. Recover the name the label embeds instead.
+//
+// Anything that is NOT one of those two shapes is a name a human typed on the
+// board ("ספיר גנון 15 רילס סטנדרט") and is returned untouched — the engine
+// must not guess at free text.
+const TITLE_COMPOSED_OURS = /^.*? \| \d{4}-\d{2}-\d{2} \d{2}:\d{2} \| (.+) x [\d.]+$/;
+const TITLE_COMPOSED_APP = /^.*? \| (.+) - [\d.]+ \| \d{4}-\d{2}-\d{2}$/;
+
+export function creditNameFromTitle(title) {
+  if (title == null) return title;
+  const t = String(title).trim();
+  const m = TITLE_COMPOSED_OURS.exec(t) || TITLE_COMPOSED_APP.exec(t);
+  const name = m && m[1].trim();
+  return name || title;
+}
+
 // Monday→DB counterpart to PUSH_CONFIG.relations: resolve a child item's
 // board_relation columns to the DB FK column, by matching the linked Monday item
 // to a parent DB row via its monday_item_id. Same board_relation column ids as
@@ -171,6 +193,13 @@ export const INBOUND_RELATIONS = {
   ],
   lead: [
     { fk: 'salesperson_id', parentEntity: 'salesperson', column: 'board_relation_mky9akx2' }, // איש מכירות
+  ],
+  credit: [
+    // Mirror of PUSH_CONFIG.credit.relations — same board_relation column, read
+    // inbound. Without it a credit created in Monday (or created there by our own
+    // push and reflected back) lands with deal_id NULL and belongs to no deal:
+    // 165 live production rows were in that state.
+    { fk: 'deal_id', parentEntity: 'deal', column: 'board_relation_mkv7apeh' },              // עסקה מקושרת
   ],
 };
 
@@ -186,6 +215,9 @@ export function hasInboundRelations(entityType) {
 // already holds both, so take them from there.
 export const INBOUND_INHERIT = {
   payment: { parentFk: 'deal_id', parentTable: 'deals', fields: ['customer_id', 'salesperson_id'] },
+  // The credits board has no customer column either — same gap, same fix. Only
+  // fills an empty customer_id, and only from a deal that has one.
+  credit: { parentFk: 'deal_id', parentTable: 'deals', fields: ['customer_id'] },
 };
 
 // Values to inherit from the parent row for ONE inbound child.

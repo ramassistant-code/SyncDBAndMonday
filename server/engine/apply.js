@@ -202,6 +202,7 @@ export async function applyPlan({ supabase, monday, target, direction, selectedK
             const item = await monday.getItem(row.mondayItemId).catch(() => null);
             const enr = await enrichPush({ supabase, target, dbRow: enrich, mode: 'update', item, cache: enrichCache, boardByEntity });
             Object.assign(colVals, enr.colVals);
+            if (enr.title) colVals.name = String(enr.title); // title tracks a DB field (coordination task)
           }
           if (Object.keys(colVals).length === 0) {
             summary.skipped++;

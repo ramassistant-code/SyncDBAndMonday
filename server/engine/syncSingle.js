@@ -16,7 +16,7 @@ import { valuesEqual } from './compare.js';
 import { coerceForDb, formatForMonday, LOOKUP_MAP } from './apply.js';
 import { contentHash, getLink, isEcho, isEnrichEcho, recordSynced, valuesHash } from './loopGuard.js';
 import { syncProductComponentFromMonday, syncProductComponentToMonday } from './productComponents.js';
-import { creditNameFromTitle, enrichPush, hasComposedTitle, resolveInboundInherited, resolveInboundRelations } from './enrich.js';
+import { creditNameFromTitle, enrichPush, hasComposedTitle, resolveInboundInherited, resolveInboundRelations, taskTextFromTitle } from './enrich.js';
 import { findLinkedItem, withRecordLock } from './pushGuard.js';
 
 const NAME_COLUMN = 'name';
@@ -105,7 +105,7 @@ export async function syncItemFromMonday({ supabase, monday, environment, boardI
   const item = await monday.getItem(itemId);
   if (!item) return { status: 'skipped', reason: 'monday item not found' };
 
-  const { table, fields, dbTypes, notNull } = await loadContext(supabase, monday, target);
+  const { table, fields, nameField, dbTypes, notNull } = await loadContext(supabase, monday, target);
 
   // Echo check: is this webhook just the reflection of a scalar write we made?
   const mondayHash = contentHash(fields, (f) => cellText(item, f.monday_column_id));
@@ -124,7 +124,7 @@ export async function syncItemFromMonday({ supabase, monday, environment, boardI
   const boardByEntity = Object.fromEntries(
     targets.filter((t) => t.monday_board_id).map((t) => [t.entity_type, String(t.monday_board_id)]),
   );
-  const resolvedRel = await resolveInboundRelations({ supabase, entityType: target.entity_type, item, boardByEntity });
+  const resolvedRel = await resolveInboundRelations({ supabase, entityType: target.entity_type, item, boardByEntity, environment });
   const relPatch = {};
   for (const [fk, val] of Object.entries(resolvedRel)) {
     if (!dbRow || !valuesEqual(dbRow[fk], val)) relPatch[fk] = val;
@@ -150,6 +150,18 @@ export async function syncItemFromMonday({ supabase, monday, environment, boardI
     .filter((f) => f.monday_column_id !== NAME_COLUMN || !NAME_INBOUND_SKIP.has(target.entity_type))
     .map((f) => ({ field: f.source_field,
       to: inboundValue(target.entity_type, f.monday_column_id, cellText(item, f.monday_column_id)) }));
+
+  // A coordination task is titled "customer | task text" — keep only the text.
+  // The customer comes from the task's deal (existing row, or the link resolved
+  // just above on create), so this needs the DB and cannot live in inboundValue.
+  if (target.entity_type === 'coordination_task') {
+    const nameChange = changes.find((ch) => ch.field === nameField);
+    if (nameChange) {
+      nameChange.to = await taskTextFromTitle({
+        supabase, title: nameChange.to, dealId: relPatch.deal_id || dbRow?.deal_id || null,
+      });
+    }
+  }
 
   if (changes.length) await ensureLookups(supabase, target.entity_type, changes);
 
@@ -348,6 +360,9 @@ async function pushRecordToMonday({ supabase, monday, environment, entityType, d
       if (f !== undefined) colVals[m.monday_column_id] = f;
     }
     Object.assign(colVals, enr.colVals);
+    // A composed title that tracks a DB field (coordination task) is re-written
+    // when it drifted; the date-stamped ones never set enr.title on update.
+    if (enr.title) colVals[NAME_COLUMN] = String(enr.title);
     if (Object.keys(colVals).length === 0) {
       const mondayHashNow = item ? contentHash(fields, (f) => cellText(item, f.monday_column_id)) : supabaseHash;
       await recordSynced(supabase, {

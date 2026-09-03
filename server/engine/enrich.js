@@ -10,12 +10,24 @@
 // These only ever run on the DB→Monday PUSH path (real-time cascade + manual
 // db_to_monday apply). The Monday→DB pull path is unaffected.
 //
-// Monday column ids below mirror the live boards. board_relation ids are IDENTICAL
-// dev↔prod (dev was cloned from prod). Columns added recently (payment→salesperson
-// link, task→deal, payment "salesperson" status, discount reasons) MUST be verified
-// in production before enabling there — see SYNC_FIXES.md.
+// Monday column ids below mirror the live boards. Most board_relation ids are
+// IDENTICAL dev↔prod (dev was cloned from prod) — but columns added AFTER the
+// clone got a different id on each side. A `column` may therefore be either a
+// string (same id everywhere) or `{ test: id, production: id }`, keyed by the
+// target's `environment`; see relationColumn(). Verified live 2026-09-03 with
+// prod_bootstrap/probe_relation_columns.mjs — rerun it whenever a board changes.
 
 import { ENTITY_TABLE } from './entities.js';
+
+// The Monday column id for a relation/derived config entry in ONE environment.
+// Returns null when the entry has no id for that environment (→ the caller
+// skips it) — a prod push must never fall back to a dev column id, which
+// Monday rejects silently (the link just never appears).
+export function relationColumn(entry, environment) {
+  const c = entry.column;
+  if (c == null || typeof c === 'string') return c || null;
+  return c[environment] || null;
+}
 
 // Pinned to Israel time so composed titles read the same regardless of host
 // timezone (the engine runs on Railway/UTC).
@@ -73,7 +85,9 @@ export const PUSH_CONFIG = {
     title: { build: (r, ctx) => joinTitle([ctx.customer, fmtDateTime(r.created_at)]) },
     relations: [
       { fk: 'deal_id', parentEntity: 'deal', column: 'board_relation_mktnjr7z' },          // 5b payment → deal
-      { fk: 'salesperson_id', parentEntity: 'salesperson', column: 'board_relation_mm5js0ns' }, // 8  payment → salesperson (link by id)
+      // 8  payment → salesperson (link by id). Added after the dev clone → a
+      //    different column id per environment ("לינק איש מכירות" / "אנשי מכירות").
+      { fk: 'salesperson_id', parentEntity: 'salesperson', column: { test: 'board_relation_mm5js0ns', production: 'board_relation_mm5jmf0w' } },
     ],
     derived: [
       // 7  "איש מכירות" status = the salesperson's full name (label created if missing).
@@ -98,8 +112,19 @@ export const PUSH_CONFIG = {
     ],
   },
   coordination_task: {
+    // "customer | task text". The task row carries no customer_id — the customer
+    // is the deal's (customerVia). Unlike the date-stamped titles above, this one
+    // IS the task's content, so it is kept in step on update too: an edit to
+    // task_text in the app renames the item, and a rename on the board is parsed
+    // back through taskTextFromTitle() so the prefix never lands in task_text.
+    title: {
+      build: (r, ctx) => joinTitle([ctx.customer, r.task_text]),
+      customerVia: { fk: 'deal_id', table: 'deals' },
+      update: true,
+    },
     relations: [
-      { fk: 'deal_id', parentEntity: 'deal', column: 'board_relation_mm5jv7cn' },          // 5c task → deal
+      // 5c task → deal ("עסקה מקושרת"). Added after the dev clone → per-env id.
+      { fk: 'deal_id', parentEntity: 'deal', column: { test: 'board_relation_mm5jv7cn', production: 'board_relation_mm5jveeq' } },
     ],
   },
   salesperson: {
@@ -180,6 +205,28 @@ export function creditNameFromTitle(title) {
   return name || title;
 }
 
+// ── Monday title → coordination task text ─────────────────────────────
+// The task item is titled "customer | task text" (PUSH_CONFIG.coordination_task).
+// The `name` mapping is bidirectional, so a rename webhook (including the echo
+// of our own composed title) would otherwise write the whole label into
+// task_text. Strip exactly "<the deal's customer> | " — never a guessed prefix,
+// so a title a human typed that happens to contain " | " survives untouched.
+// `dealId` is the task's deal (existing row, or the relation just resolved on
+// create); without a resolvable customer the title passes through unchanged.
+export async function taskTextFromTitle({ supabase, title, dealId, cache }) {
+  if (title == null || !dealId) return title;
+  const deal = await fetchRow(supabase, cache, 'deals', dealId, 'id,customer_id');
+  if (!deal?.customer_id) return title;
+  const customer = await fetchRow(supabase, cache, 'customers', deal.customer_id, 'id,name');
+  const name = customer?.name && String(customer.name).trim();
+  if (!name) return title;
+  const t = String(title);
+  const prefix = `${name} | `;
+  if (!t.startsWith(prefix)) return title;
+  const rest = t.slice(prefix.length).trim();
+  return rest || title;
+}
+
 // Monday→DB counterpart to PUSH_CONFIG.relations: resolve a child item's
 // board_relation columns to the DB FK column, by matching the linked Monday item
 // to a parent DB row via its monday_item_id. Same board_relation column ids as
@@ -189,7 +236,13 @@ export function creditNameFromTitle(title) {
 export const INBOUND_RELATIONS = {
   payment: [
     { fk: 'deal_id', parentEntity: 'deal', column: 'board_relation_mktnjr7z' },          // עסקה מקושרת
-    { fk: 'salesperson_id', parentEntity: 'salesperson', column: 'board_relation_mm5js0ns' }, // לינק איש מכירות
+    { fk: 'salesperson_id', parentEntity: 'salesperson', column: { test: 'board_relation_mm5js0ns', production: 'board_relation_mm5jmf0w' } }, // לינק איש מכירות / אנשי מכירות
+  ],
+  coordination_task: [
+    // Mirror of PUSH_CONFIG.coordination_task.relations. deal_id is NOT NULL on
+    // deal_coordination_tasks, so a task created on the board must carry its
+    // "עסקה מקושרת" link to reach the DB at all.
+    { fk: 'deal_id', parentEntity: 'deal', column: { test: 'board_relation_mm5jv7cn', production: 'board_relation_mm5jveeq' } },
   ],
   lead: [
     { fk: 'salesperson_id', parentEntity: 'salesperson', column: 'board_relation_mky9akx2' }, // איש מכירות
@@ -247,12 +300,14 @@ export async function resolveInboundInherited({ supabase, entityType, dbRow, res
 // An empty relation is skipped (never nulls the FK — clearing a link in Monday
 // does not wipe the DB FK, mirroring the outbound "never clear" guard). The caller
 // diffs against the current row and only writes changed FKs (idempotent).
-export async function resolveInboundRelations({ supabase, entityType, item, boardByEntity = null }) {
+export async function resolveInboundRelations({ supabase, entityType, item, boardByEntity = null, environment = null }) {
   const rels = INBOUND_RELATIONS[entityType];
   const out = {};
   if (!rels || !item) return out;
   for (const rel of rels) {
-    const linkedIds = currentRelationIds(item, rel.column);
+    const column = relationColumn(rel, environment);
+    if (!column) continue;                                 // no column id for this env
+    const linkedIds = currentRelationIds(item, column);
     if (!linkedIds.length) continue;                       // relation empty → leave FK untouched
     const table = ENTITY_TABLE[rel.parentEntity];
     if (!table) continue;
@@ -273,10 +328,10 @@ export function hasPushConfig(entityType) {
   return Boolean(PUSH_CONFIG[entityType]);
 }
 
-// True only for entities whose Monday title is a COMPOSED name (create-only,
-// DB-owned) — used to skip overwriting the title with the mapped name field on
-// update. Entities with only relations/derived/computed (salesperson,
-// coordination_task) keep syncing their name normally.
+// True only for entities whose Monday title is a COMPOSED name (DB-owned) —
+// used to skip overwriting the title with the mapped name field on update, and
+// to drop `name` from the batch diff. Entities with only relations/derived/
+// computed (salesperson) keep syncing their name normally.
 export function hasComposedTitle(entityType) {
   return Boolean(PUSH_CONFIG[entityType]?.title);
 }
@@ -335,18 +390,38 @@ export async function enrichPush({ supabase, target, dbRow, mode = 'create', cac
   const out = { title: null, colVals: {}, fingerprint: {} };
   if (!cfg) return out;
 
-  // customer name for the composed title
-  if (cfg.title && mode === 'create') {
+  const environment = target.environment || null;
+
+  // Composed title. Written on create; also on update for entities whose title
+  // tracks a DB field (`title.update`) — then `out.title` is set only when the
+  // item's current name differs, and the title joins the fingerprint so the
+  // echo guard sees a task_text edit that changes nothing else.
+  if (cfg.title && (mode === 'create' || cfg.title.update)) {
     let customer = null;
-    if (dbRow.customer_id) {
-      const c = await fetchRow(supabase, cache, 'customers', dbRow.customer_id, 'id,name');
+    // The row's own customer, or the parent's when the table has no customer_id
+    // (a coordination task belongs to a deal; the deal names the customer).
+    let customerId = dbRow.customer_id || null;
+    if (!customerId && cfg.title.customerVia && dbRow[cfg.title.customerVia.fk]) {
+      const parent = await fetchRow(supabase, cache, cfg.title.customerVia.table, dbRow[cfg.title.customerVia.fk], 'id,customer_id');
+      customerId = parent?.customer_id || null;
+    }
+    if (customerId) {
+      const c = await fetchRow(supabase, cache, 'customers', customerId, 'id,name');
       customer = c?.name || null;
     }
-    out.title = cfg.title.build(dbRow, { customer });
+    const title = cfg.title.build(dbRow, { customer });
+    if (mode === 'create') {
+      out.title = title;
+    } else if (title && String(title).trim() !== '') {
+      out.fingerprint.name = String(title);
+      if (String(item?.name ?? '').trim() !== String(title).trim()) out.title = title;
+    }
   }
 
   // board_relation links → { <col>: { item_ids: [parentItemId] } }
   for (const rel of (cfg.relations || [])) {
+    const column = relationColumn(rel, environment);
+    if (!column) continue;                                  // no column id for this env
     const fkVal = dbRow[rel.fk];
     if (!fkVal) continue;
     const table = ENTITY_TABLE[rel.parentEntity];
@@ -358,9 +433,9 @@ export async function enrichPush({ supabase, target, dbRow, mode = 'create', cac
     if (boardByEntity && boardByEntity[rel.parentEntity] &&
         String(parent.monday_board_id) !== String(boardByEntity[rel.parentEntity])) continue;
     const parentItemId = Number(parent.monday_item_id);
-    out.fingerprint[rel.column] = { item_ids: [parentItemId] };
-    if (mode === 'update' && currentRelationIds(item, rel.column).includes(parentItemId)) continue; // already linked
-    out.colVals[rel.column] = { item_ids: [parentItemId] };
+    out.fingerprint[column] = { item_ids: [parentItemId] };
+    if (mode === 'update' && currentRelationIds(item, column).includes(parentItemId)) continue; // already linked
+    out.colVals[column] = { item_ids: [parentItemId] };
   }
 
   // derived joined values → status label / text

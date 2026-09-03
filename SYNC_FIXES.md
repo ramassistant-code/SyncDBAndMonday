@@ -70,3 +70,28 @@
 - **Backfill של קשרים לפריטים קיימים** נעשה על **יצירה** (עסקה/קרדיט/תשלום חדשים) ובדחיפת `db_to_monday` ידנית מה-UI. פריט קיים שכבר סונכרן במלואו ורק חסר לו קשר — לא יעודכן אוטומטית ע"י webhook בזמן אמת (מנגנון ה-echo/loopGuard מדלג עליו). כדי לקשר פריטים היסטוריים: הרץ דחיפה ידנית (`direction: db_to_monday`) מה-UI.
 - **סיבת הנחה** נבדקת רק אחרי הרצת 008 (העמודה חייבת להתקיים לפני שהמיפוי פעיל, אחרת ה-diff נכשל).
 - שעון הכותרות מקובע ל-`Asia/Jerusalem`.
+
+---
+
+## איש מכירות ראשון (סוגר) על הלקוח — 2026-09-03
+
+**כלל עסקי:** על כל לקוח נשמר איש המכירות **הראשון** שסגר אותו (`customers.first_salesperson_id`),
+נקבע פעם אחת בעסקה הראשונה ולא נדרס; איש המכירות של כל עסקה נשאר על העסקה (`deals.salesperson_id`).
+לקוחות קיימים → רם (backfill).
+
+**DB (אפליקציה):** `Bist-Production-System/lib/db/sql/customers/01_first_salesperson_id.sql` — עמודה + FK + backfill.
+חובה להריץ **לפני** פריסת קוד האפליקציה (Drizzle מרחיב SELECT לרשימת עמודות מפורשת).
+
+**Monday:** עמודת **סטטוס** "איש-מכירות-ראשון" בלוח הלקוחות, נוצרה ידנית ב-03/09 בשתי הסביבות
+ולכן עם מזהה שונה לכל סביבה: dev (`5100631736`) `color_mm6v2rkc`, פרוד (`2091985169`) `color_mm6vpfg4`.
+הקוד מחזיק `{ test, production }` (כמו לינק איש מכירות בתשלום). למה סטטוס ולא Connect boards: ה-API של Monday
+מסרב ליצור `board_relation` ("This column type is not supported yet in the API"), ותווית-שם היא אותו דפוס
+כמו "איש מכירות" בלוח העסקאות.
+
+**מנוע:**
+- `enrich.js` `PUSH_CONFIG.customer.derived` — DB→Monday: `first_salesperson_id` → `app_users.full_name` → תווית סטטוס (נוצרת אם חסרה).
+- `enrich.js` `INBOUND_DERIVED.customer` + `resolveInboundDerived` — Monday→DB: תווית → `app_users` לפי `full_name` (רק התאמה יחידה; תווית ריקה/לא-מוכרת/כפולה לא נוגעת ב-FK).
+- `syncSingle.js` `syncDealGraph` — הלקוח **תמיד** רוכב על ה-cascade של `deal_created` (נפתר מ-`deals.customer_id`), לא רק כשהאפליקציה שולחת `customerId`. בלי זה החותמת על לקוח קיים לא הייתה מגיעה ללוח.
+
+**Backfill ל-Monday:** ה-backfill ב-SQL לא מפעיל push. כדי שהלקוחות הקיימים יראו "רם" בלוח — דחיפה ידנית
+`db_to_monday` ליעד `customers` מה-UI (ה-derived רץ גם במסלול הזה).

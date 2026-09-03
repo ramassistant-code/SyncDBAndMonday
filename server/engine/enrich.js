@@ -72,6 +72,16 @@ export const PUSH_CONFIG = {
     relations: [
       { fk: 'lead_id', parentEntity: 'lead', column: 'board_relation_mkzm5f4f' },   // customer → lead
     ],
+    derived: [
+      // "איש-מכירות-ראשון" status = full name of the FIRST salesperson who closed
+      // this customer (customers.first_salesperson_id, write-once in the app on
+      // the customer's first deal; existing customers were backfilled to רם).
+      // Status columns created by hand on 2026-09-03 → a different id per
+      // environment. Label created if missing. Paired with
+      // INBOUND_DERIVED.customer for Monday→DB.
+      { fk: 'first_salesperson_id', table: 'app_users', field: 'full_name', type: 'status',
+        column: { test: 'color_mm6v2rkc', production: 'color_mm6vpfg4' } },
+    ],
   },
   lead: {
     // "איש מכירות": mirror leads.salesperson_id → the salesperson's Monday item on
@@ -259,6 +269,57 @@ export const INBOUND_RELATIONS = {
 
 export function hasInboundRelations(entityType) {
   return Boolean(INBOUND_RELATIONS[entityType]);
+}
+
+// Monday→DB counterpart to PUSH_CONFIG.derived for STATUS columns whose labels
+// are names of rows in another table: the label text is resolved back to that
+// row's id and written to the FK column. Only used where the board column is a
+// status (a board_relation goes through INBOUND_RELATIONS instead).
+//   { fk, table, field, column, filters? }
+//     fk      — DB FK column on the entity's table
+//     table   — parent table the label names a row of
+//     field   — parent column holding the label text (must be unique among
+//               non-deleted rows; an ambiguous or unknown label is SKIPPED —
+//               the engine never guesses, and never clears the FK)
+//     column  — Monday status column id
+//     filters — extra PostgREST predicates on the parent lookup
+export const INBOUND_DERIVED = {
+  customer: [
+    // "איש-מכירות-ראשון" — an admin correcting the closer on the board lands in
+    // customers.first_salesperson_id. Same per-env column ids as the push side.
+    { fk: 'first_salesperson_id', table: 'app_users', field: 'full_name',
+      column: { test: 'color_mm6v2rkc', production: 'color_mm6vpfg4' } },
+  ],
+};
+
+// Resolve inbound status labels of `item` to DB FK values for `entityType`.
+// Returns { <fk>: <parentDbId> } for each derived column whose label is NON-EMPTY
+// in Monday AND names exactly one live parent row. Empty label → FK untouched
+// (clearing the status in Monday does not wipe the DB FK, same as relations).
+export async function resolveInboundDerived({ supabase, entityType, item, cache, environment = null }) {
+  const cfgs = INBOUND_DERIVED[entityType];
+  const out = {};
+  if (!cfgs || !item) return out;
+  for (const d of cfgs) {
+    const column = relationColumn(d, environment);           // string or per-env map, like relations
+    if (!column) continue;
+    const label = String(currentText(item, column) || '').trim();
+    if (!label) continue;                                   // empty → leave FK untouched
+    const key = `${d.table}:${d.field}=${label}`;
+    let rows = cache && cache.has(key) ? cache.get(key) : null;
+    if (!rows) {
+      rows = await supabase.select(d.table, {
+        columns: 'id',
+        // the connector URL-encodes filter values (URLSearchParams) — pass the raw label
+        filters: [`${d.field}=eq.${label}`, 'deleted_at=is.null', ...(d.filters || [])],
+        limit: 2,
+      }).catch(() => []);
+      if (cache) cache.set(key, rows);
+    }
+    if (rows.length !== 1) continue;                        // unknown or ambiguous name → never guess
+    out[d.fk] = rows[0].id;
+  }
+  return out;
 }
 
 // Fields a child INHERITS from its parent when the child's own value is empty.
@@ -453,9 +514,11 @@ export async function enrichPush({ supabase, target, dbRow, mode = 'create', cac
       val = await d.fallback({ supabase, dbRow, cache });
     }
     if (val == null || String(val).trim() === '') continue;
-    out.fingerprint[d.column] = String(val);
-    if (mode === 'update' && String(currentText(item, d.column) || '').trim() === String(val).trim()) continue; // unchanged
-    out.colVals[d.column] = d.type === 'status' ? { label: String(val) } : String(val);
+    const column = relationColumn(d, environment);     // string, or per-env map (customer first salesperson)
+    if (!column) continue;                              // no column in this env → skip, never guess
+    out.fingerprint[column] = String(val);
+    if (mode === 'update' && String(currentText(item, column) || '').trim() === String(val).trim()) continue; // unchanged
+    out.colVals[column] = d.type === 'status' ? { label: String(val) } : String(val);
   }
 
   // computed columns → a value derived from this row itself (no join)

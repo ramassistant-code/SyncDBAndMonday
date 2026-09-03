@@ -16,7 +16,7 @@ import { valuesEqual } from './compare.js';
 import { coerceForDb, formatForMonday, LOOKUP_MAP } from './apply.js';
 import { contentHash, getLink, isEcho, isEnrichEcho, recordSynced, valuesHash } from './loopGuard.js';
 import { syncProductComponentFromMonday, syncProductComponentToMonday } from './productComponents.js';
-import { creditNameFromTitle, enrichPush, hasComposedTitle, resolveInboundInherited, resolveInboundRelations, taskTextFromTitle } from './enrich.js';
+import { creditNameFromTitle, enrichPush, hasComposedTitle, resolveInboundDerived, resolveInboundInherited, resolveInboundRelations, taskTextFromTitle } from './enrich.js';
 import { findLinkedItem, withRecordLock } from './pushGuard.js';
 
 const NAME_COLUMN = 'name';
@@ -127,6 +127,14 @@ export async function syncItemFromMonday({ supabase, monday, environment, boardI
   const resolvedRel = await resolveInboundRelations({ supabase, entityType: target.entity_type, item, boardByEntity, environment });
   const relPatch = {};
   for (const [fk, val] of Object.entries(resolvedRel)) {
+    if (!dbRow || !valuesEqual(dbRow[fk], val)) relPatch[fk] = val;
+  }
+
+  // Status columns whose labels name a row elsewhere (customer → first
+  // salesperson): label text → FK. Same rules as relations — runs on an echo
+  // too, only changed FKs are written, an unknown label is skipped.
+  const resolvedDerived = await resolveInboundDerived({ supabase, entityType: target.entity_type, item, environment });
+  for (const [fk, val] of Object.entries(resolvedDerived)) {
     if (!dbRow || !valuesEqual(dbRow[fk], val)) relPatch[fk] = val;
   }
 
@@ -401,20 +409,25 @@ export async function syncDealGraph({ supabase, monday, environment, dealId, inc
   };
 
   await push('deal', dealId);
-  await push('customer', includeCustomerId);
 
-  // The lead ALWAYS rides the cascade: the caller may name it (includeLeadId),
-  // but the app doesn't pass it — in production not one lead had ever been pushed
-  // DB→Monday (787/787 links last_source='monday'). So resolve deals.lead_id
-  // ourselves. This is what carries the "deal opened → 'לקוח פעיל'" status
-  // (migration 016) to Monday: DB→Monday runs on THIS path only, and the
-  // scheduled sync is Monday→DB, so an unpushed status is overwritten on the
-  // next pull instead of reaching the board.
+  // The customer and the lead ALWAYS ride the cascade. The caller may name them
+  // (includeCustomerId / includeLeadId) but historically the app passed neither:
+  // in production not one lead had ever been pushed DB→Monday (787/787 links
+  // last_source='monday'). So resolve deals.customer_id / deals.lead_id ourselves.
+  // Lead: this is what carries the "deal opened → 'לקוח פעיל'" status (migration
+  // 016) to Monday. Customer: a deal stamps customers.first_salesperson_id on the
+  // customer's FIRST deal (write-once), and that value only reaches the board's
+  // "איש מכירות ראשון" status if the customer is pushed here. DB→Monday runs on
+  // THIS path only; the scheduled sync is Monday→DB, so an unpushed value is
+  // overwritten on the next pull instead of reaching the board.
+  let customerId = includeCustomerId;
   let leadId = includeLeadId;
-  if (!leadId) {
-    const rows = await supabase.select('deals', { columns: 'lead_id', filters: [`id=eq.${dealId}`], limit: 1 }).catch(() => []);
-    leadId = rows[0]?.lead_id || null;
+  if (!customerId || !leadId) {
+    const rows = await supabase.select('deals', { columns: 'customer_id,lead_id', filters: [`id=eq.${dealId}`], limit: 1 }).catch(() => []);
+    customerId = customerId || rows[0]?.customer_id || null;
+    leadId = leadId || rows[0]?.lead_id || null;
   }
+  await push('customer', customerId);
   await push('lead', leadId);
 
   // Children linked by deal_id.

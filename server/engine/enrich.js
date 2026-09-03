@@ -239,9 +239,10 @@ export const INBOUND_RELATIONS = {
     { fk: 'salesperson_id', parentEntity: 'salesperson', column: { test: 'board_relation_mm5js0ns', production: 'board_relation_mm5jmf0w' } }, // לינק איש מכירות / אנשי מכירות
   ],
   coordination_task: [
-    // Mirror of PUSH_CONFIG.coordination_task.relations. deal_id is NOT NULL on
-    // deal_coordination_tasks, so a task created on the board must carry its
-    // "עסקה מקושרת" link to reach the DB at all.
+    // Mirror of PUSH_CONFIG.coordination_task.relations, so a task created on the
+    // board with a "עסקה מקושרת" link reaches the DB with its deal_id (the live
+    // column is nullable — 6 of 24 prod rows are deal-less seed/test tasks — but
+    // a task without a deal has no customer and no place in the app).
     { fk: 'deal_id', parentEntity: 'deal', column: { test: 'board_relation_mm5jv7cn', production: 'board_relation_mm5jveeq' } },
   ],
   lead: [
